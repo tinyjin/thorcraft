@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ThorCraft</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14; }
+      canvas { display: block; outline: none; cursor: default; image-rendering: auto; }
+      #boot { position: fixed; inset: 0; display: grid; place-items: center; color: #9fb3c8; font: 14px system-ui, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" tabindex="0"></canvas>
+    <div id="boot">Loading ThorVG…</div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
