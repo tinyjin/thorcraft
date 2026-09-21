@@ -6,6 +6,11 @@ import { Tex, texture } from './textures';
 
 type RGBA = readonly [number, number, number, number?];
 
+/** Supplies flattened Lottie artwork for items that have one (see lottie3d.ts); set by the game. */
+type FlatArt = { shapes: { r: number; g: number; b: number; a: number; polys: Float32Array[] }[]; w: number; h: number } | null;
+let flatArt: (asset: string) => FlatArt = () => null;
+export const setFlatArtProvider = (fn: (asset: string) => FlatArt) => { flatArt = fn; };
+
 interface PooledText { paint: any; str: string; size: number; color: string }
 
 export class UILayer {
@@ -26,7 +31,9 @@ export class UILayer {
     this.scene.add(this.shapeScene).add(this.iconScene).add(this.overScene).add(this.textScene);
   }
 
-  begin() { this.si = 0; this.ti = 0; this.oi = 0; for (const e of this.icons.values()) e.used = 0; }
+  private temps: any[] = [];
+
+  begin() { for (const t of this.temps) this.iconScene.remove(t); this.temps.length = 0; this.si = 0; this.ti = 0; this.oi = 0; for (const e of this.icons.values()) e.used = 0; }
 
   /** Returns a cleared shape that draws above everything requested before it. */
   shape(): any {
@@ -50,7 +57,13 @@ export class UILayer {
     let e = this.icons.get(id);
     if (!e) this.icons.set(id, (e = { scenes: [], used: 0 }));
     let sc = e.scenes[e.used];
-    if (!sc) { sc = buildIcon(this.TVG, id); e.scenes.push(sc); this.iconScene.add(sc); }
+    if (!sc) {
+      const built = buildIcon(this.TVG, id);
+      sc = built.scene;
+      this.iconScene.add(sc);
+      // Placeholder icons (Lottie art not extracted yet) are not pooled, so they get rebuilt later.
+      if (built.final) e.scenes.push(sc); else { this.temps.push(sc); e.used--; }
+    }
     e.used++;
     sc.visible(true).scale(r).translate(cx, cy);
   }
@@ -114,7 +127,7 @@ export function isoCube(ui: UILayer, cx: number, cy: number, r: number, top: rea
  * Builds a unit-sized icon scene: an isometric cube with 8x8 vector texels for blocks, a flat
  * 16x16 sprite for everything else. Polygons are merged into one shape per color.
  */
-function buildIcon(TVG: any, id: number): any {
+function buildIcon(TVG: any, id: number): { scene: any; final: boolean } {
   const scene = new TVG.Scene();
   const shapes = new Map<number, any>();
   const poly = (pts: number[], r: number, g: number, b: number, a: number) => {
@@ -125,6 +138,14 @@ function buildIcon(TVG: any, id: number): any {
     s.moveTo(pts[0], pts[1]);
     for (let i = 2; i < pts.length; i += 2) s.lineTo(pts[i], pts[i + 1]);
     s.close();
+  };
+  // Lottie outlines keep their artwork order, so each one gets its own shape instead of merging by color.
+  const poly2 = (p: Float32Array, k: number, w: number, h: number, c: { r: number; g: number; b: number; a: number }) => {
+    const s = new TVG.Shape();
+    s.moveTo((p[0] - w / 2) * k, (p[1] - h / 2) * k);
+    for (let i = 2; i < p.length; i += 2) s.lineTo((p[i] - w / 2) * k, (p[i + 1] - h / 2) * k);
+    s.close().fill(Math.round(c.r), Math.round(c.g), Math.round(c.b), c.a);
+    scene.add(s);
   };
   // Draws a texture onto the parallelogram origin + u * U + v * V.
   const face = (tex: Tex, ox: number, oy: number, ux: number, uy: number, vx: number, vy: number, shade: number, alpha: number, lodIndex: number) => {
@@ -137,6 +158,17 @@ function buildIcon(TVG: any, id: number): any {
     for (let k = 0; k < rc.length; k += 5) quad(rc[k] / lod.n - e, rc[k + 1] / lod.n - e, rc[k + 2] / lod.n + e, rc[k + 3] / lod.n + e, lod.tones[rc[k + 4]], 255);
   };
   const def = ITEMS.get(id);
+  if (def?.lottie) {
+    // The icon is frame 0 of the item's Lottie, rebuilt from the same outlines the 3D world uses.
+    const art = flatArt(def.lottie);
+    if (art) {
+      const k = 2.5 / Math.max(art.w, art.h);
+      for (const sh of art.shapes) for (const poly of sh.polys) poly.length >= 6 && poly2(poly, k, art.w, art.h, sh);
+      return { scene, final: true };
+    }
+    face(texture(def.icon), -1.25, -1.25, 2.5, 0, 0, 2.5, 1, 255, 0);
+    return { scene, final: false };
+  }
   if (def && isBlockId(id) && CUBE[id]) {
     const f = BLOCKS[id].faces, hx = 0.92, hy = 0.46, sh = 2 - 2 * hy, a = Math.max(BLOCKS[id].alpha, 150);
     face(texture(f[2]), 0, -1, hx, hy, -hx, hy, 1, a, 1);
@@ -145,5 +177,5 @@ function buildIcon(TVG: any, id: number): any {
   } else if (def) {
     face(texture(def.icon), -1.25, -1.25, 2.5, 0, 0, 2.5, 1, 255, 0);
   }
-  return scene;
+  return { scene, final: true };
 }

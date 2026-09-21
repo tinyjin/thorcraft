@@ -7,6 +7,12 @@ export const enum B {
   TALLGRASS, FLOWER_RED, FLOWER_YELLOW, GLOWSTONE, LAVA, OBSIDIAN,
   WOOL_WHITE, WOOL_RED, WOOL_BLUE, WOOL_GREEN, WOOL_YELLOW, WOOL_BLACK,
   BOOKSHELF, IRON_BLOCK, GOLD_BLOCK, DIAMOND_BLOCK, STONE_BRICKS, DEADBUSH, BIRCH_PLANKS, SPRUCE_PLANKS,
+  // Villages
+  PATH, HAY, LANTERN,
+  // Ember Depths
+  EMBER_ROCK, ASH, MAGMA, GLOW_CRYSTAL, EMBER_ORE, EMBER_BLOCK, EMBER_PORTAL,
+  // Vector Void
+  VOID_STONE, VOID_BRICKS, PORTAL_FRAME, PORTAL_FRAME_EYE, VOID_PORTAL, ANCHOR_CRYSTAL, TROPHY,
   COUNT,
 }
 
@@ -17,6 +23,11 @@ export const enum I {
   // 16 tools follow: material (wood, stone, iron, diamond) x type (pickaxe, axe, shovel, sword)
   TOOL0 = 261,
   PORK_RAW = 277, PORK_COOKED, BEEF_RAW, BEEF_COOKED, APPLE, GUNPOWDER, ROTTEN_FLESH,
+  /** An item whose artwork is a Lottie animation, in the world, in the hand and in the inventory. */
+  LOTTIE_STAR,
+  IGNITER, EMBER_INGOT, VECTOR_EYE, BREAD, WHEAT,
+  // Ember tools: pickaxe, axe, shovel, sword
+  EMBER_TOOL0 = 300,
 }
 
 export type ToolType = 'pickaxe' | 'axe' | 'shovel' | 'sword';
@@ -31,6 +42,8 @@ export interface ItemDef {
   tool?: ToolDef; food: number; fuel: number; hidden: boolean;
   /** Texture name used for the flat icon (items and cross shaped blocks). */
   icon: string;
+  /** Name of a Lottie asset that replaces the pixel icon everywhere. */
+  lottie?: string;
 }
 
 export interface BlockDef extends ItemDef {
@@ -124,6 +137,23 @@ block(B.STONE_BRICKS, 'Stone Bricks', 'stone_bricks', { hard: 1.5, tool: P, tier
 block(B.DEADBUSH, 'Dead Bush', 'deadbush', { render: 'cross', hard: 0, drop: I.STICK, sound: 'grass', replaceable: true });
 block(B.BIRCH_PLANKS, 'Birch Planks', 'birch_planks', { hard: 2, tool: A, sound: 'wood', fuel: 15 });
 block(B.SPRUCE_PLANKS, 'Spruce Planks', 'spruce_planks', { hard: 2, tool: A, sound: 'wood', fuel: 15 });
+block(B.PATH, 'Path', ['path_top', 'dirt', 'path_side'], { hard: 0.6, tool: S, drop: B.DIRT, sound: 'dirt' });
+block(B.HAY, 'Hay Bale', ['hay_top', 'hay_top', 'hay_side'], { hard: 0.5, sound: 'grass', fuel: 8 });
+block(B.LANTERN, 'Lantern', 'lantern', { hard: 0.5, light: 3, sound: 'glass' });
+block(B.EMBER_ROCK, 'Ember Rock', 'ember_rock', { hard: 0.9, tool: P, tier: 1 });
+block(B.ASH, 'Ash', 'ash', { hard: 0.4, tool: S, sound: 'sand', gravity: true });
+block(B.MAGMA, 'Magma', 'magma', { hard: 1, tool: P, tier: 1, light: 1 });
+block(B.GLOW_CRYSTAL, 'Glow Crystal', 'glow_crystal', { hard: 0.4, light: 3, sound: 'glass' });
+block(B.EMBER_ORE, 'Ember Ore', 'ember_ore', { hard: 4, tool: P, tier: 4 });
+block(B.EMBER_BLOCK, 'Block of Ember', 'ember_block', { hard: 5, tool: P, tier: 4, light: 1 });
+block(B.EMBER_PORTAL, 'Ember Portal', 'ember_portal', { solid: false, opaque: false, alpha: 170, light: 2, hard: -1, drop: 0, hidden: true, sound: 'glass' });
+block(B.VOID_STONE, 'Void Stone', 'void_stone', { hard: 2.5, tool: P, tier: 2 });
+block(B.VOID_BRICKS, 'Void Bricks', 'void_bricks', { hard: 2.5, tool: P, tier: 2 });
+block(B.PORTAL_FRAME, 'Portal Frame', ['frame_top', 'void_stone', 'frame_side'], { hard: -1, hidden: true });
+block(B.PORTAL_FRAME_EYE, 'Portal Frame', ['frame_eye', 'void_stone', 'frame_side'], { hard: -1, light: 1, hidden: true });
+block(B.VOID_PORTAL, 'Void Portal', 'void_portal', { solid: false, opaque: false, alpha: 215, light: 2, hard: -1, drop: 0, hidden: true });
+block(B.ANCHOR_CRYSTAL, 'Anchor Crystal', 'anchor_crystal', { hard: 1.2, light: 3, drop: 0, sound: 'glass', hidden: true });
+block(B.TROPHY, 'Outline Trophy', ['trophy_top', 'void_bricks', 'trophy_side'], { hard: 1, light: 2 });
 
 function item(id: number, name: string, icon: string, o: { stack?: number; tool?: ToolDef; food?: number; fuel?: number } = {}) {
   ITEMS.set(id, { id, name, isBlock: false, stack: o.stack ?? 64, tool: o.tool, food: o.food ?? 0, fuel: o.fuel ?? 0, hidden: false, icon });
@@ -134,9 +164,9 @@ item(I.COAL, 'Coal', 'coal', { fuel: 80 });
 item(I.IRON_INGOT, 'Iron Ingot', 'iron_ingot');
 item(I.GOLD_INGOT, 'Gold Ingot', 'gold_ingot');
 item(I.DIAMOND, 'Diamond', 'diamond');
-export const TOOL_MATS: ReadonlyArray<readonly [string, string, number, number]> = [['wood', 'Wooden', 1, 60], ['stone', 'Stone', 2, 132], ['iron', 'Iron', 3, 251], ['diamond', 'Diamond', 4, 1562]];
+export const TOOL_MATS: ReadonlyArray<readonly [string, string, number, number]> = [['wood', 'Wooden', 1, 60], ['stone', 'Stone', 2, 132], ['iron', 'Iron', 3, 251], ['diamond', 'Diamond', 4, 1562], ['ember', 'Ember', 5, 2600]];
 export const TOOL_TYPES: ReadonlyArray<readonly [ToolType, string, number]> = [['pickaxe', 'Pickaxe', 1], ['axe', 'Axe', 2], ['shovel', 'Shovel', 0.5], ['sword', 'Sword', 3]];
-export const toolId = (mat: number, type: number) => I.TOOL0 + mat * 4 + type;
+export const toolId = (mat: number, type: number) => (mat === 4 ? I.EMBER_TOOL0 : I.TOOL0 + mat * 4) + type;
 TOOL_MATS.forEach(([mk, mn, tier, dur], mi) => TOOL_TYPES.forEach(([tk, tn, dmg], ti) => {
   item(toolId(mi, ti), `${mn} ${tn}`, `${mk}_${tk}`, { stack: 1, tool: { type: tk, tier, dur, damage: 1 + dmg + tier, mat: mk }, fuel: mk === 'wood' ? 10 : 0 });
 }));
@@ -147,13 +177,21 @@ item(I.BEEF_COOKED, 'Steak', 'beef_cooked', { food: 8 });
 item(I.APPLE, 'Apple', 'apple', { food: 4 });
 item(I.GUNPOWDER, 'Gunpowder', 'gunpowder');
 item(I.ROTTEN_FLESH, 'Rotten Flesh', 'rotten_flesh', { food: 2 });
+item(I.LOTTIE_STAR, 'Lottie Star', 'gold_ingot', { food: 6 });
+ITEMS.get(I.LOTTIE_STAR)!.lottie = 'star';
+item(I.IGNITER, 'Igniter', 'igniter', { stack: 1 });
+item(I.EMBER_INGOT, 'Ember Ingot', 'ember_ingot');
+item(I.VECTOR_EYE, 'Vector Eye', 'vector_eye', { stack: 16 });
+item(I.BREAD, 'Bread', 'bread', { food: 5 });
+item(I.WHEAT, 'Wheat', 'wheat');
 
-export const TOOL_SPEED = [1, 2, 4, 6, 8];
+export const TOOL_SPEED = [1, 2, 4, 6, 8, 11];
 
 export const SMELT = new Map<number, number>([
   [B.SAND, B.GLASS], [B.COBBLE, B.STONE], [B.IRON_ORE, I.IRON_INGOT], [B.GOLD_ORE, I.GOLD_INGOT],
   [I.PORK_RAW, I.PORK_COOKED], [I.BEEF_RAW, I.BEEF_COOKED], [B.LOG, I.COAL], [B.BIRCH_LOG, I.COAL],
   [B.SPRUCE_LOG, I.COAL], [B.COAL_ORE, I.COAL], [B.DIAMOND_ORE, I.DIAMOND], [B.STONE, B.STONE_BRICKS],
+  [B.EMBER_ORE, I.EMBER_INGOT], [B.VOID_STONE, B.VOID_BRICKS],
 ]);
 
 export const itemName = (id: number) => ITEMS.get(id)?.name ?? '?';

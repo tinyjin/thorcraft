@@ -4,7 +4,9 @@
 import { B, BLOCKS, ITEMS, isBlockId } from './blocks';
 import { EntityManager, Mob, MobKind } from './entities';
 import { Inventory } from './inventory';
+import { Lottie3D } from './lottie3d';
 import { Player } from './player';
+import { villageRegion } from './structures';
 import { WH, World } from './world';
 
 export interface CheatApi {
@@ -13,10 +15,12 @@ export interface CheatApi {
   getTime(): number; setTime(t: number): void; addDays(n: number): void;
   setCreative(on: boolean): void; isCreative(): boolean;
   seed(): string; say(msg: string): void;
+  gotoDim(d: 'overworld' | 'ember' | 'void'): void; addGems(n: number): void;
+  lottie: Lottie3D; setFlatMode(m: 'extrude' | 'card'): void;
 }
 
-const MOBS: MobKind[] = ['pig', 'cow', 'sheep', 'zombie', 'creeper'];
-const HOSTILE = new Set<MobKind>(['zombie', 'creeper']);
+const MOBS: MobKind[] = ['pig', 'cow', 'sheep', 'zombie', 'creeper', 'slime', 'ghost', 'cinder', 'ashling', 'glitch', 'outline'];
+const HOSTILE = new Set<MobKind>(['zombie', 'creeper', 'ghost', 'cinder', 'ashling', 'glitch', 'outline']);
 const TIMES: Record<string, number> = { day: 1000, noon: 6000, sunset: 12000, night: 13000, midnight: 18000, sunrise: 23000 };
 
 /** Item lookup by Minecraft-like key ("oak_planks", "diamond_pickaxe") or numeric id. */
@@ -27,6 +31,9 @@ itemKeys.set('water', B.WATER); itemKeys.set('lava', B.LAVA); itemKeys.set('air'
 const HELP = `Cheat commands (dev only) - run with cmd('/...'):
   /time set <day|noon|sunset|night|midnight|sunrise|0-24000>    /time add <ticks>    /time query
   /summon <${MOBS.join('|')}> [x y z] [count]                   (coordinates accept ~ and ~offset)
+  /lottie3d <extrude|card>              extruded layered cutouts (default) or flat camera facing cards
+  /dim <overworld|ember|void>           jump between dimensions
+  /locate <village|stronghold>          nearest structure (then /tp to it)      /gems <n>
   /give <item> [count]        /clear                            /items [filter]  lists item names
   /gamemode <survival|creative>                                 /fly
   /tp <x y z>                 /spawnpoint                       /seed
@@ -102,6 +109,36 @@ export function installCheats(api: CheatApi) {
         console.log(list.join('  '));
         return list.join(' ');
       }
+
+      case 'lottie3d': {
+        const m = (a[0] ?? '').toLowerCase();
+        if (m !== 'extrude' && m !== 'card') return fail('Usage: /lottie3d <extrude|card>');
+        api.setFlatMode(m);
+        return out(`Lottie art is now drawn as ${m === 'extrude' ? 'extruded cutouts' : 'flat cards'}`);
+      }
+
+      case 'dim': case 'dimension': {
+        const d = (a[0] ?? '').toLowerCase();
+        if (d !== 'overworld' && d !== 'ember' && d !== 'void') return fail('Usage: /dim <overworld|ember|void>');
+        api.gotoDim(d);
+        return out(`Travelling to ${d}`);
+      }
+
+      case 'locate': {
+        const what = (a[0] ?? '').toLowerCase();
+        if (world.dim !== 'overworld') return fail('Structures exist in the overworld only');
+        if (what === 'stronghold') { const [x, y, z] = world.strongholdEntrance(); return out(`Stronghold entrance at ${x} ${y} ${z}  ->  cmd('/tp ${x} ${y + 1} ${z}')`); }
+        if (what === 'village') {
+          let best: { cx: number; cy: number; cz: number } | null = null, bd = 1e9;
+          const rx = villageRegion(p.x), rz = villageRegion(p.z);
+          for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) { const v = world.villageOf(rx + dx, rz + dz); if (v) { const d = Math.hypot(v.cx - p.x, v.cz - p.z); if (d < bd) { bd = d; best = v; } } }
+          if (!best) return fail('No village within reach');
+          return out(`Village at ${best.cx} ${best.cy} ${best.cz} (${Math.round(bd)} blocks)  ->  cmd('/tp ${best.cx} ${best.cy + 6} ${best.cz}')`);
+        }
+        return fail('Usage: /locate <village|stronghold>');
+      }
+
+      case 'gems': { const n = Number(a[0]); if (Number.isNaN(n)) return fail('Usage: /gems <amount to add>'); api.addGems(n); return out(`Added ${n} gems`); }
 
       case 'clear': inv.slots.fill(null); return out('Cleared the inventory');
 

@@ -22,7 +22,7 @@ type HeartAnim = keyof typeof HEART_SEG;
 interface HeartSlot { full: any; half: any; level: number; anim: HeartAnim; variant: number; t: number }
 
 export interface Settings { renderDist: number; fov: number; sens: number; vol: number; auto: boolean }
-export type WindowKind = 'inventory' | 'crafting' | 'furnace';
+export type WindowKind = 'inventory' | 'crafting' | 'furnace' | 'trade';
 
 const mapColorCache = new Map<number, readonly [number, number, number]>();
 const mapColor = (id: number) => {
@@ -518,6 +518,54 @@ export class Hud {
       t.rect(inp.mouseX + 14, inp.mouseY - 30, tw + 16, 22, [16, 0, 32, 245]);
     }
     return clicked;
+  }
+
+  /** Villager trade list. Returns the index of the offer that was clicked, or -1. */
+  drawTrade(job: string, trades: { id: number; count: number; gems: number }[], gems: number, inv: Inventory): number {
+    this.dim(140);
+    const ui = this.menu, w = this.w, h = this.h;
+    const rowH = 46, panelW = 430, panelH = 86 + trades.length * rowH;
+    const px = Math.floor((w - panelW) / 2), py = Math.floor((h - panelH) / 2);
+    ui.rect(px - 2, py - 2, panelW + 4, panelH + 4, [0, 0, 0, 255]);
+    ui.rect(px, py, panelW, panelH, [255, 255, 255, 255]);
+    ui.rect(px + 3, py + 3, panelW - 3, panelH - 3, [85, 85, 85, 255]);
+    ui.rect(px + 3, py + 3, panelW - 6, panelH - 6, PANEL);
+    ui.text(`${job[0].toUpperCase()}${job.slice(1)} - trades`, px + 16, py + 22, 16, PANEL_TEXT, 0, 0.5);
+    this.gem(ui, px + panelW - 78, py + 22, 8);
+    ui.text(String(gems), px + panelW - 64, py + 22, 16, PANEL_TEXT, 0, 0.5);
+    let picked = -1;
+    trades.forEach((t, i) => {
+      const y = py + 42 + i * rowH, buying = t.gems > 0;
+      const can = buying ? gems >= t.gems : inv.count(t.id) >= t.count;
+      const over = this.over(px + 12, y, panelW - 24, rowH - 6);
+      if (over && can) this.hot = true;
+      ui.rect(px + 12, y, panelW - 24, rowH - 6, over && can ? [176, 188, 220, 255] : can ? [160, 160, 160, 255] : [132, 132, 132, 255]);
+      ui.frame(px + 12, y, panelW - 24, rowH - 6, [70, 70, 70, 255], 1.5);
+      const cy = y + (rowH - 6) / 2, ink = can ? PANEL_TEXT : ([96, 96, 100, 255] as const);
+      // Left: what the player gives. Right: what the player gets.
+      const item = (x: number) => { ui.icon(t.id, x + 16, cy, 11); ui.text(`${t.count} x ${itemName(t.id)}`, x + 36, cy, 13.5, ink, 0, 0.5); };
+      const price = (x: number) => { this.gem(ui, x + 14, cy, 9); ui.text(`${Math.abs(t.gems)} gem${Math.abs(t.gems) > 1 ? 's' : ''}`, x + 30, cy, 13.5, ink, 0, 0.5); };
+      const ax = px + (buying ? 150 : 250);
+      if (buying) { price(px + 20); item(px + 190); } else { item(px + 20); price(px + 290); }
+      ui.poly([ax, cy - 5, ax + 14, cy - 5, ax + 14, cy - 10, ax + 26, cy, ax + 14, cy + 10, ax + 14, cy + 5, ax, cy + 5], [90, 90, 94, 255]);
+      if (over && can && this.input.clicked[0]) picked = i;
+    });
+    ui.text('Click an offer to trade   |   E or Esc to close', px + panelW / 2, py + panelH - 18, 12, PANEL_TEXT, 0.5, 0.5);
+    return picked;
+  }
+
+  private gem(ui: UILayer, cx: number, cy: number, r: number) {
+    ui.poly([cx, cy - r, cx + r * 0.8, cy - r * 0.2, cx, cy + r, cx - r * 0.8, cy - r * 0.2], [60, 200, 210]);
+    ui.poly([cx, cy - r, cx + r * 0.8, cy - r * 0.2, cx - r * 0.8, cy - r * 0.2], [170, 245, 250]);
+  }
+
+  /** Boss health across the top; the bar is grey while anchor crystals still shield it. */
+  drawBossBar(name: string, frac: number, anchors: number) {
+    const ui = this.hud, w = this.w, bw = Math.min(520, w * 0.5), x = (w - bw) / 2, y = 34;
+    ui.text(anchors > 0 ? `${name} - shielded by ${anchors} anchor crystal${anchors > 1 ? 's' : ''}` : name, w / 2, y - 12, 15, [235, 240, 255, 255], 0.5, 0.5, 2);
+    ui.rect(x - 2, y - 2, bw + 4, 14, [0, 0, 0, 200]);
+    ui.rect(x, y, bw, 10, [40, 36, 70, 255]);
+    ui.rect(x, y, bw * Math.max(0, Math.min(1, frac)), 10, anchors > 0 ? [150, 156, 176, 255] : [120, 255, 240, 255]);
   }
 
   drawLoading(progress: number) {

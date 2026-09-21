@@ -39,6 +39,15 @@ export class Inventory {
     return room >= count;
   }
 
+  count(id: number): number { let n = 0; for (const s of this.slots) if (s && s.id === id) n += s.count; return n; }
+
+  /** Takes `count` items out of any slots; false (and no change) if there are not enough. */
+  remove(id: number, count: number): boolean {
+    if (this.count(id) < count) return false;
+    for (let i = SLOTS - 1; i >= 0 && count > 0; i--) { const s = this.slots[i]; if (!s || s.id !== id) continue; const n = Math.min(count, s.count); s.count -= n; count -= n; if (!s.count) this.slots[i] = null; }
+    return true;
+  }
+
   consumeHeld(n = 1) {
     const s = this.held;
     if (!s) return;
@@ -87,7 +96,7 @@ for (const [blk, it] of [[B.IRON_BLOCK, I.IRON_INGOT], [B.GOLD_BLOCK, I.GOLD_ING
   add(['###', '###', '###'], { '#': it }, blk);
   add(['#'], { '#': blk }, it, 9);
 }
-const MAT_ITEM: (number | number[])[] = [PLANKS, B.COBBLE, I.IRON_INGOT, I.DIAMOND];
+const MAT_ITEM: (number | number[])[] = [PLANKS, B.COBBLE, I.IRON_INGOT, I.DIAMOND, I.EMBER_INGOT];
 TOOL_MATS.forEach((_, mi) => {
   const k = { m: MAT_ITEM[mi], s: I.STICK };
   add(['mmm', ' s ', ' s '], k, toolId(mi, 0));
@@ -95,6 +104,15 @@ TOOL_MATS.forEach((_, mi) => {
   add(['m', 's', 's'], k, toolId(mi, 2));
   add(['m', 'm', 's'], k, toolId(mi, 3));
 });
+add(['i ', ' f'], { i: I.IRON_INGOT, f: B.GRAVEL }, I.IGNITER);
+add(['###', '###', '###'], { '#': I.EMBER_INGOT }, B.EMBER_BLOCK);
+add(['#'], { '#': B.EMBER_BLOCK }, I.EMBER_INGOT, 9);
+add([' e ', 'ede', ' e '], { e: I.EMBER_INGOT, d: I.DIAMOND }, I.VECTOR_EYE, 2);
+add(['www'], { w: I.WHEAT }, I.BREAD);
+add(['##', '##'], { '#': I.WHEAT }, B.HAY);
+add(['#'], { '#': B.HAY }, I.WHEAT, 4);
+add(['i', 't'], { i: I.IRON_INGOT, t: B.TORCH }, B.LANTERN);
+add(['##', '##'], { '#': B.GLOW_CRYSTAL }, B.GLOWSTONE);
 export const RECIPES = R;
 
 /** Matches a size x size crafting grid against all recipes (anywhere in the grid, mirrored too). */
@@ -120,7 +138,7 @@ export function matchRecipe(grid: (Stack | null)[], size: number): Stack | null 
 
 // ---------------------------------------------------------------- furnace
 
-export interface Furnace { x: number; y: number; z: number; slots: (Stack | null)[]; burn: number; burnMax: number; cook: number; lit?: boolean }
+export interface Furnace { dim?: string; x: number; y: number; z: number; slots: (Stack | null)[]; burn: number; burnMax: number; cook: number; lit?: boolean }
 export const COOK_TIME = 8;
 
 /** Advances one furnace; returns whether it is burning. Slots: input, fuel, output. */

@@ -43,3 +43,23 @@ export function cloudSvg(variant: number): string {
 <defs><linearGradient id="c" x1="0" y1="30" x2="0" y2="110" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#dfe9fb"/></linearGradient></defs>
 <g fill="#b9c8e6" opacity="0.9">${bottom}</g><g fill="url(#c)">${top}</g></svg>`;
 }
+
+/** The ringed planet that hangs over the Vector Void. */
+export function planetSvg(): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-160 -100 320 200" width="320" height="200">
+<defs><radialGradient id="p" cx="-20" cy="-24" r="92" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#b9a4ff"/><stop offset="0.55" stop-color="#5b46c8"/><stop offset="1" stop-color="#1b1350"/></radialGradient>
+<linearGradient id="r" x1="-150" y1="0" x2="150" y2="0" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#5ef0dc" stop-opacity="0.15"/><stop offset="0.5" stop-color="#8ffcf0"/><stop offset="1" stop-color="#5ef0dc" stop-opacity="0.15"/></linearGradient>
+<clipPath id="front"><rect x="-160" y="0" width="320" height="100"/></clipPath></defs>
+<ellipse cx="0" cy="0" rx="148" ry="30" fill="none" stroke="url(#r)" stroke-width="9" transform="rotate(-14)"/>
+<circle cx="0" cy="0" r="72" fill="url(#p)"/>
+<g fill="#ffffff" opacity="0.12"><ellipse cx="-22" cy="-30" rx="34" ry="8"/><ellipse cx="14" cy="8" rx="44" ry="7"/><ellipse cx="-8" cy="38" rx="30" ry="6"/></g>
+<g clip-path="url(#front)"><ellipse cx="0" cy="0" rx="148" ry="30" fill="none" stroke="url(#r)" stroke-width="9" transform="rotate(-14)"/></g></svg>`;
+}
+
+/** A band of aurora for the Void sky; several are layered and swayed with transforms. */
+export function auroraSvg(hue: number): string {
+  const c = hue === 0 ? ['#3df5d0', '#2a7cff'] : hue === 1 ? ['#b06bff', '#ff5fd0'] : ['#5eff9a', '#3df5d0'];
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 200" width="600" height="200">
+<defs><linearGradient id="a" x1="0" y1="0" x2="0" y2="200" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="${c[0]}" stop-opacity="0"/><stop offset="0.45" stop-color="${c[0]}" stop-opacity="0.55"/><stop offset="1" stop-color="${c[1]}" stop-opacity="0"/></linearGradient></defs>
+<path d="M0 120 C 80 40, 160 170, 250 90 S 420 30, 600 110 L 600 200 C 430 120, 400 190, 250 170 S 90 130, 0 200 Z" fill="url(#a)"/></svg>`;
+}

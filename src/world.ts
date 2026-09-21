@@ -2,6 +2,11 @@
 
 import { B, BLOCKS, CUBE, DIR_U, DIR_V, LIGHT, LIQUID, OPAQUE, REPLACEABLE, SOLID } from './blocks';
 import { Noise, clamp, hash3, mulberry32 } from './math';
+import { Stronghold, villageRegion, VOID_ARRIVAL, VOID_PILLARS, VillagePlan, planStronghold, planVillage, strongholdBlock } from './structures';
+
+/** The three worlds: the overworld, the Ember Depths (nether-like) and the Vector Void (end-like). */
+export type Dim = 'overworld' | 'ember' | 'void';
+export const EMBER_LAVA = 22, EMBER_ROOF = 84, VOID_TOP = 52;
 
 export const CS = 16; // chunk size (x, z)
 export const WH = 96; // world height
@@ -62,7 +67,11 @@ export class World {
   private tmp: Terrain = { h: 0, biome: 0, temp: 0, hum: 0 };
   private tmp2: Terrain = { h: 0, biome: 0, temp: 0, hum: 0 };
 
-  constructor(public seed: number) {
+  private villages = new Map<string, VillagePlan | null>();
+  readonly stronghold: Stronghold;
+
+  constructor(public seed: number, public dim: Dim = 'overworld') {
+    this.stronghold = planStronghold(seed);
     this.nC = new Noise(seed + 1); this.nM = new Noise(seed + 2); this.nR = new Noise(seed + 3); this.nD = new Noise(seed + 4);
     this.nT = new Noise(seed + 5); this.nH = new Noise(seed + 6);
     this.nCave1 = new Noise(seed + 7); this.nCave2 = new Noise(seed + 8); this.nCave3 = new Noise(seed + 9);
@@ -111,6 +120,13 @@ export class World {
   // ---------------------------------------------------------------- generation
 
   private generate(c: Chunk) {
+    if (this.dim === 'ember') this.genEmber(c);
+    else if (this.dim === 'void') this.genVoid(c);
+    else { this.genOverworld(c); this.stampStructures(c); }
+    this.finishChunk(c);
+  }
+
+  private genOverworld(c: Chunk) {
     const bl = c.blocks;
     const x0 = c.cx * CS, z0 = c.cz * CS;
     const seed = this.seed;
@@ -222,6 +238,11 @@ export class World {
       }
     }
 
+  }
+
+  /** Player edits, light list, column tops: shared by every dimension. */
+  private finishChunk(c: Chunk) {
+    const bl = c.blocks, x0 = c.cx * CS, z0 = c.cz * CS;
     const e = this.edits.get(key(c.cx, c.cz));
     if (e) for (const [i, id] of e) bl[i] = id;
 
@@ -236,6 +257,167 @@ export class World {
     }
     c.height = height;
     for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) this.recomputeTop(c, x, z);
+  }
+
+  // ---------------------------------------------------------------- structures
+
+  /** 1 = a village can stand here (grassland), 2 = desert village, 0 = no. Pure function of the terrain. */
+  private buildable = (x: number, z: number): 0 | 1 | 2 => {
+    const t = this.terrain(x, z, this.tmp3);
+    if (t.h <= SEA + 1 || t.h > SEA + 18) return 0;
+    return t.biome === Biome.PLAINS ? 1 : t.biome === Biome.DESERT ? 2 : 0;
+  };
+  private tmp3: Terrain = { h: 0, biome: 0, temp: 0, hum: 0 };
+  private height = (x: number, z: number) => this.terrain(x, z, this.tmp3).h;
+
+  villageOf(rx: number, rz: number): VillagePlan | null {
+    const k = rx + ',' + rz;
+    let v = this.villages.get(k);
+    if (v === undefined) this.villages.set(k, (v = this.dim === 'overworld' ? planVillage(this.seed, rx, rz, this.height, this.buildable) : null));
+    return v;
+  }
+
+  /** Villages whose center lies within `radius` blocks. */
+  villagesNear(x: number, z: number, radius: number): VillagePlan[] {
+    const out: VillagePlan[] = [], rx = villageRegion(x), rz = villageRegion(z);
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) { const v = this.villageOf(rx + dx, rz + dz); if (v && Math.hypot(v.cx - x, v.cz - z) < radius) out.push(v); }
+    return out;
+  }
+
+  private stampStructures(c: Chunk) {
+    const bl = c.blocks, x0 = c.cx * CS, z0 = c.cz * CS;
+    const put = (wx: number, y: number, wz: number, id: number) => { const x = wx - x0, z = wz - z0; if (x >= 0 && x < CS && z >= 0 && z < CS && y > 0 && y < WH) bl[idx(x, y, z)] = id; };
+    for (const v of this.villagesNear(x0 + 8, z0 + 8, 70)) {
+      for (let i = 0; i < v.paths.length; i += 2) {
+        const wx = v.paths[i], wz = v.paths[i + 1], x = wx - x0, z = wz - z0;
+        if (x < 0 || x >= CS || z < 0 || z >= CS) continue;
+        const h = this.height(wx, wz), top = bl[idx(x, h, z)];
+        if (top === B.GRASS || top === B.DIRT || top === B.SAND || top === B.SNOWGRASS) { bl[idx(x, h, z)] = v.desert ? B.SANDSTONE : B.PATH; if (!CUBE[bl[idx(x, h + 1, z)]]) bl[idx(x, h + 1, z)] = B.AIR; }
+      }
+      for (const b of v.buildings) {
+        if (b.x + b.w + 1 < x0 || b.x - 1 > x0 + 15 || b.z + b.d + 1 < z0 || b.z - 1 > z0 + 15) continue;
+        // Level the plot: fill under the floor, clear the space the building and its roof overhang need.
+        for (let dz = -1; dz <= b.d; dz++) for (let dx = -1; dx <= b.w; dx++) {
+          const wx = b.x + dx, wz = b.z + dz, inside = dx >= 0 && dx < b.w && dz >= 0 && dz < b.d;
+          if (inside) for (let y = Math.max(1, this.height(wx, wz)); y < b.y; y++) put(wx, y, wz, B.COBBLE);
+          for (let y = b.y + 1; y <= b.y + b.h + 3; y++) put(wx, y, wz, B.AIR);
+        }
+        for (let k = 0; k < b.blocks.length; k += 4) put(b.x + b.blocks[k], b.y + b.blocks[k + 1], b.z + b.blocks[k + 2], b.blocks[k + 3]);
+      }
+    }
+    // Stronghold: only chunks along its room and stair tunnel pay for the lookup.
+    const s = this.stronghold;
+    if (x0 + 15 >= s.x - 8 && x0 <= s.x + 100 && z0 + 15 >= s.z - 8 && z0 <= s.z + 8) {
+      for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) {
+        const wx = x0 + x, wz = z0 + z;
+        if (Math.abs(wz - s.z) > 7) continue;
+        const surface = this.strongholdSurface();
+        for (let y = s.roomY; y <= Math.min(WH - 2, surface + 6); y++) { const id = strongholdBlock(s, wx, y, wz, surface); if (id >= 0) bl[idx(x, y, z)] = id; }
+      }
+    }
+  }
+
+  private shSurface = -1;
+  /** Height at which the rising stair tunnel breaks through the terrain. */
+  private strongholdSurface(): number {
+    if (this.shSurface < 0) {
+      const s = this.stronghold;
+      this.shSurface = WH - 10;
+      for (let t = 0; t < 90; t++) { const y = s.roomY + 1 + t; if (y >= Math.max(SEA + 1, this.height(s.x + 8 + t, s.z))) { this.shSurface = y; break; } }
+    }
+    return this.shSurface;
+  }
+
+  /** Where the stair tunnel of the stronghold surfaces. */
+  strongholdEntrance(): [number, number, number] {
+    const s = this.stronghold, surface = this.strongholdSurface();
+    return [s.x + 8 + (surface - s.roomY), surface + 1, s.z];
+  }
+
+  // ---------------------------------------------------------------- Ember Depths
+
+  /** A closed cave world: rock everywhere except where a 3D noise field carves caverns; lava fills the low parts. */
+  private genEmber(c: Chunk) {
+    const bl = c.blocks, x0 = c.cx * CS, z0 = c.cz * CS, seed = this.seed;
+    for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) {
+      const wx = x0 + x, wz = z0 + z;
+      const big = this.nC.fbm2(wx / 90, wz / 90, 2);
+      for (let y = 0; y <= EMBER_ROOF; y++) {
+        let id: number = B.EMBER_ROCK;
+        if (y === 0 || y === EMBER_ROOF) id = B.BEDROCK;
+        else {
+          // Density: caverns in the middle, solid toward floor and roof.
+          const edge = Math.max(0, 10 - y) * 0.09 + Math.max(0, y - (EMBER_ROOF - 14)) * 0.07;
+          const n = this.nCave1.n3(wx / 38, y / 24, wz / 38) + this.nCave2.n3(wx / 15, y / 12, wz / 15) * 0.35 + big * 0.35;
+          if (n - edge > 0.04) id = y <= EMBER_LAVA ? B.LAVA : B.AIR;
+        }
+        bl[idx(x, y, z)] = id;
+      }
+    }
+    // Surface dressing: ash and magma on floors, crystals under ceilings.
+    for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) for (let y = 1; y < EMBER_ROOF; y++) {
+      const i = idx(x, y, z), id = bl[i];
+      if (id !== B.EMBER_ROCK) continue;
+      const above = bl[idx(x, y + 1, z)], below = bl[idx(x, y - 1, z)], r = hash3(x0 + x, y, z0 + z, seed + 90);
+      if (above === B.AIR) { if (this.nD.n2((x0 + x) / 14, (z0 + z) / 14) > 0.25) bl[i] = B.ASH; else if (y <= EMBER_LAVA + 2 && r < 0.5) bl[i] = B.MAGMA; }
+      else if (above === B.LAVA && r < 0.35) bl[i] = B.MAGMA;
+      if (below === B.AIR && r < 0.012) { bl[idx(x, y - 1, z)] = B.GLOW_CRYSTAL; if (r < 0.005 && bl[idx(x, y - 2, z)] === B.AIR) bl[idx(x, y - 2, z)] = B.GLOW_CRYSTAL; }
+    }
+    const rnd = mulberry32((hash3(c.cx, 3, c.cz, seed + 91) * 4294967296) | 0);
+    for (let n = 0; n < 7; n++) {
+      let x = Math.floor(rnd() * 16), y = 6 + Math.floor(rnd() * 66), z = Math.floor(rnd() * 16);
+      for (let k = 0; k < 6; k++) {
+        if (x >= 0 && x < 16 && z >= 0 && z < 16 && y > 0 && y < EMBER_ROOF) { const i = idx(x, y, z); if (bl[i] === B.EMBER_ROCK) bl[i] = B.EMBER_ORE; }
+        x += Math.floor(rnd() * 3) - 1; y += Math.floor(rnd() * 3) - 1; z += Math.floor(rnd() * 3) - 1;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- Vector Void
+
+  /** Islands floating in nothing: one large central island with crystal pillars, smaller ones further out. */
+  private genVoid(c: Chunk) {
+    const bl = c.blocks, x0 = c.cx * CS, z0 = c.cz * CS, seed = this.seed;
+    for (let z = 0; z < CS; z++) for (let x = 0; x < CS; x++) {
+      const wx = x0 + x, wz = z0 + z, d = Math.hypot(wx, wz);
+      let top = -1, thick = 0;
+      if (d < 70) {
+        const f = 1 - (d / 70) ** 2;
+        top = VOID_TOP + Math.round(this.nD.fbm2(wx / 40, wz / 40, 3) * 3);
+        thick = Math.round(f * 20 + this.nM.fbm2(wx / 22, wz / 22, 2) * 5 * f);
+      } else if (d > 110) {
+        const n = this.nC.fbm2(wx / 60 + 9, wz / 60 - 4, 3);
+        if (n > 0.22) { const f = Math.min(1, (n - 0.22) * 6); top = 40 + Math.round(this.nH.fbm2(wx / 140, wz / 140, 2) * 16); thick = Math.round(f * 12); }
+      }
+      if (thick <= 0) continue;
+      for (let y = Math.max(1, top - thick); y <= top; y++) {
+        let id: number = B.VOID_STONE;
+        if (y < top - 2) { const r = hash3(wx >> 1, y >> 1, wz >> 1, seed + 95); if (d > 110 && r < 0.03) id = B.DIAMOND_ORE; else if (r > 0.97) id = B.GLOW_CRYSTAL; }
+        bl[idx(x, y, z)] = id;
+      }
+      // Pillars of obsidian with an anchor crystal on top.
+      for (const [px, pz, ph] of VOID_PILLARS) {
+        const pd = Math.hypot(wx - px, wz - pz);
+        if (pd > 2.4) continue;
+        for (let y = top + 1; y <= top + ph; y++) bl[idx(x, y, z)] = B.OBSIDIAN;
+        if (wx === px && wz === pz) bl[idx(x, top + ph + 1, z)] = B.ANCHOR_CRYSTAL;
+      }
+      // Dormant exit portal in the middle, and the arrival pad.
+      if (Math.abs(wx) <= 2 && Math.abs(wz) <= 2) {
+        bl[idx(x, top, z)] = B.VOID_BRICKS;
+        if (Math.max(Math.abs(wx), Math.abs(wz)) === 2) bl[idx(x, top + 1, z)] = B.PORTAL_FRAME; else bl[idx(x, top + 1, z)] = B.AIR;
+      }
+      if (Math.abs(wx - VOID_ARRIVAL[0]) <= 2 && Math.abs(wz - VOID_ARRIVAL[2]) <= 2) bl[idx(x, top, z)] = B.OBSIDIAN;
+    }
+  }
+
+  /** Nearest spot at or around `y` where a body can stand: solid below, two free blocks. -1 when the column has none. */
+  floorAt(x: number, y: number, z: number, range = 24): number {
+    for (let d = 0; d <= range; d++) for (const yy of d === 0 ? [y] : [y - d, y + d]) {
+      if (yy < 1 || yy >= WH - 2) continue;
+      if (SOLID[this.getBlock(x, yy - 1, z)] && !SOLID[this.getBlock(x, yy, z)] && !SOLID[this.getBlock(x, yy + 1, z)] && !LIQUID[this.getBlock(x, yy, z)] && this.getBlock(x, yy - 1, z) !== B.MAGMA) return yy;
+    }
+    return -1;
   }
 
   private tree(kind: number, x: number, y: number, z: number, rnd: () => number, set: (x: number, y: number, z: number, id: number, onlyAir: boolean) => void) {

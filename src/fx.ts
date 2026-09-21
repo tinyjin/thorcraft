@@ -12,7 +12,7 @@ import { CS, World } from './world';
 const MAX_GLOWS = 28;
 const GLOW_DIST = 34;
 
-export interface PostState { menuOpen: boolean; underwater: boolean; inLava: boolean; hurt: number; night: number }
+export interface PostState { menuOpen: boolean; underwater: boolean; inLava: boolean; hurt: number; night: number; dim: 'overworld' | 'ember' | 'void'; /** 0..1 while standing in a portal: the view melts before the jump. */ portal: number }
 
 export type BillboardKind = 'alert' | 'fuse' | 'sparkle';
 const BILLBOARDS: Record<BillboardKind, { json: () => string; frames: number; loop: boolean; pool: number }> = {
@@ -95,12 +95,13 @@ export class Fx {
   /** Blur and color grading of the whole 3D view. Only touches the scene when something changed. */
   post(st: PostState, dt: number) {
     if (!this.enabled) return;
-    const want = st.menuOpen ? 7 : st.underwater ? 1.6 : 0;
+    const want = st.menuOpen ? 7 : Math.max(st.underwater ? 1.6 : 0, st.portal * 9);
     this.blur += (want - this.blur) * Math.min(1, dt * 10);
     const sigma = Math.round(this.blur * 2) / 2;
     const hurt = Math.round(clamp(st.hurt * 190, 0, 60) / 6) * 6;
     const night = Math.round((st.night * 22) / 4) * 4;
-    const key = `${sigma}|${st.underwater}|${st.inLava}|${hurt}|${night}`;
+    const portal = Math.round(st.portal * 10) * 8;
+    const key = `${sigma}|${st.underwater}|${st.inLava}|${hurt}|${night}|${st.dim}|${portal}`;
     if (key === this.postKey) return;
     this.postKey = key;
     const s = this.worldScene;
@@ -108,7 +109,10 @@ export class Fx {
       s.resetEffects();
       if (st.inLava) s.tint(70, 10, 0, 255, 170, 60, 70);
       else if (st.underwater) s.tint(0, 18, 60, 130, 200, 255, 55);
+      else if (st.dim === 'ember') s.tint(40, 4, 0, 255, 196, 150, 38); // everything glows like coals
+      else if (st.dim === 'void') s.tint(10, 4, 40, 214, 226, 255, 30);
       else if (night > 0) s.tint(4, 6, 30, 205, 215, 255, night); // moonlit blue grade
+      if (portal > 0) s.tint(60, 10, 110, 235, 190, 255, portal);
       if (hurt > 0) s.tint(50, 0, 0, 255, 110, 110, hurt);
       if (sigma > 0) s.gaussianBlur(sigma, 0, 0, 50);
     } catch { this.enabled = false; }
@@ -118,6 +122,7 @@ export class Fx {
   lights(world: World, cam: Camera, env: Environment, dt: number, active: boolean) {
     let used = 0;
     const strength = 0.3 + 0.7 * env.night;
+    if (env.skyKind !== 'normal') env = { ...env, sunDir: [0, -1, 0] }; // no sun bloom without a sun
     if (active && this.enabled) {
       const ccx = Math.floor(cam.x / CS), ccz = Math.floor(cam.z / CS), cand = this.candidates;
       cand.length = 0;
@@ -139,6 +144,7 @@ export class Fx {
       for (let i = 0; i < cand.length; i += 4) {
         const bx = cand[i + 1], by = cand[i + 2], bz = cand[i + 3];
         const id = world.getBlock(bx, by, bz);
+        if (id === B.EMBER_PORTAL || id === B.VOID_PORTAL || id === B.MAGMA || id === B.EMBER_BLOCK || id === B.PORTAL_FRAME_EYE) continue; // large glowing surfaces need no halo
         const lx = bx + 0.5, ly = by + (id === B.TORCH ? 0.62 : 0.5), lz = bz + 0.5;
         const p = project(cam, lx, ly, lz);
         if (!p) continue;

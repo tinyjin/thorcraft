@@ -150,3 +150,143 @@ export function sparkleLottie(): string {
   };
   return doc(96, 96, SPARKLE_FRAMES, [tw(1, 22, 26, 16, 0), tw(2, 74, 38, 12, 14), tw(3, 40, 76, 14, 28), tw(4, 70, 80, 9, 6)]);
 }
+
+// ---------------------------------------------------------------- 2D characters for the 3D world (see lottie3d.ts)
+
+const shapePath = (v: number[][], i: number[][], o: number[][], closed = true) => ({ c: closed, v, i, o });
+const pathItem = (ks: object) => ({ ty: 'sh', d: 1, ks });
+
+/** A hopping slime: squash and stretch on the layer, a stroked smile, soft shadow. 30 frame loop. */
+export function slimeLottie(): string {
+  const N = 30, c = 32, floor = 58;
+  const body = pathItem(still(shapePath([[8, floor], [10, 34], [32, 20], [54, 34], [56, floor]], [[0, 0], [-4, 10], [-14, 0], [0, -10], [0, 0]], [[0, 0], [0, -10], [14, 0], [4, 10], [0, 0]]) as never));
+  const smile = pathItem(still(shapePath([[24, 44], [32, 48], [40, 44]], [[0, 0], [-4, 0], [0, 0]], [[0, 0], [4, 0], [0, 0]], false) as never));
+  const hop: Key[] = [{ t: 0, s: [c, floor, 0] }, { t: 6, s: [c, floor, 0] }, { t: 14, s: [c, floor - 18, 0] }, { t: 22, s: [c, floor, 0] }, { t: N - 1, s: [c, floor, 0] }];
+  const squash: Key[] = [{ t: 0, s: [100, 100, 100] }, { t: 6, s: [122, 78, 100] }, { t: 11, s: [86, 120, 100] }, { t: 18, s: [92, 110, 100] }, { t: 23, s: [124, 76, 100] }, { t: N - 1, s: [100, 100, 100] }];
+  const shadow: Key[] = [{ t: 0, s: [100, 100, 100] }, { t: 6, s: [112, 100, 100] }, { t: 14, s: [62, 62, 100] }, { t: 23, s: [114, 100, 100] }, { t: N - 1, s: [100, 100, 100] }];
+  return doc(64, 64, N, [
+    layer(1, N, [
+      group([ellipse(24, 38, 5, 6), ellipse(40, 38, 5, 6), fill([24, 40, 24])]),
+      group([ellipse(23, 37, 9, 11), ellipse(41, 37, 9, 11), fill([255, 255, 255])]),
+      group([smile, stroke([24, 60, 30], 2.4, 2)]),
+      group([ellipse(20, 29, 8, 5), fill([200, 250, 190])]),
+      group([body, fill([96, 200, 96])]),
+    ], { a: [c, floor, 0], p: hop, s: squash }),
+    layer(2, N, [group([ellipse(c, floor + 1, 44, 8), fill([20, 30, 20])])], { a: [c, floor + 1, 0], p: [c, floor + 1, 0], s: shadow, o: 45 }),
+  ]);
+}
+
+/** A floating ghost whose hem is a morphing path (vertex keyframes), with swaying arms. 40 frame loop. */
+export function ghostLottie(): string {
+  const N = 40, top = 10, hem = 66;
+  const bodyAt = (ph: number) => {
+    const w = (k: number) => hem + Math.sin(ph + k * 2.1) * 5;
+    return shapePath([[12, 34], [32, top], [52, 34], [52, w(0)], [42, w(1) - 7], [32, w(2)], [22, w(3) - 7], [12, w(4)]],
+      [[0, 12], [-12, 0], [0, -12], [0, 0], [4, 0], [4, 0], [4, 0], [4, 0]], [[0, -12], [12, 0], [0, 12], [-4, 0], [-4, 0], [-4, 0], [-4, 0], [0, 0]]);
+  };
+  const keys = [];
+  for (let k = 0; k <= 4; k++) keys.push({ t: Math.min(N - 1, (k * N) / 4), s: [bodyAt((k / 4) * Math.PI * 2)], i: { x: 0.5, y: 1 }, o: { x: 0.5, y: 0 } });
+  const float: Key[] = [{ t: 0, s: [32, 40, 0] }, { t: N / 2, s: [32, 34, 0] }, { t: N - 1, s: [32, 40, 0] }];
+  const arm = (x: number, dir: number): object => layer(dir > 0 ? 2 : 3, N, [group([ellipse(0, 8, 9, 18), fill([226, 232, 250])])], {
+    p: [{ t: 0, s: [x, 38, 0] }, { t: N / 2, s: [x, 32, 0] }, { t: N - 1, s: [x, 38, 0] }],
+    r: [{ t: 0, s: [dir * 24] }, { t: N / 2, s: [dir * 52] }, { t: N - 1, s: [dir * 24] }],
+  });
+  return doc(64, 80, N, [
+    layer(1, N, [
+      group([ellipse(25, 30, 6, 9), ellipse(39, 30, 6, 9), fill([30, 30, 60])]),
+      group([ellipse(32, 44, 8, 6), fill([60, 50, 90])]),
+      group([pathItem({ a: 1, k: keys }), fill([240, 244, 255])]),
+    ], { a: [32, 40, 0], p: float }),
+    arm(10, 1), arm(54, -1),
+  ]);
+}
+
+/** A spinning, pulsing star used as an item. 36 frame loop. */
+export function starItemLottie(): string {
+  const N = 36, st5 = (outer: number, inner: number, c: number[]) => group([{ ty: 'sr', sy: 1, d: 1, pt: still(5), p: still([0, 0]), r: still(0), ir: still(inner), is: still(0), or: still(outer), os: still(0) }, fill(c)]);
+  return doc(64, 64, N, [layer(1, N, [st5(10, 4.5, [255, 250, 200]), st5(19, 8.5, [255, 214, 70]), st5(24, 10.5, [200, 130, 20])], {
+    p: [32, 34, 0], r: [{ t: 0, s: [-14] }, { t: N / 2, s: [14] }, { t: N - 1, s: [-14] }],
+    s: [{ t: 0, s: [92, 92, 100] }, { t: N / 2, s: [110, 110, 100] }, { t: N - 1, s: [92, 92, 100] }],
+  })]);
+}
+
+// ---------------------------------------------------------------- villagers and the creatures of the other dimensions
+
+const poly = (n: number, x: number, y: number, outer: number, inner = 0, rot = 0) => ({ ty: 'sr', sy: inner ? 1 : 2, d: 1, pt: still(n), p: still([x, y]), r: still(rot), ir: still(inner), is: still(0), or: still(outer), os: still(0) });
+const closed = (v: number[][]) => pathItem(still(shapePath(v, v.map(() => [0, 0]), v.map(() => [0, 0])) as never));
+
+/** Robed villager seen from the front; the job picks robe, hat and prop. 40 frame idle loop (bob, nod, blink). */
+export function villagerLottie(job: 'farmer' | 'smith' | 'librarian'): string {
+  const N = 40, skin = [214, 164, 120], robe = job === 'farmer' ? [150, 110, 60] : job === 'smith' ? [70, 70, 78] : [120, 70, 160];
+  const trim = job === 'farmer' ? [90, 150, 70] : job === 'smith' ? [200, 120, 50] : [240, 220, 140];
+  const bob: Key[] = [{ t: 0, s: [32, 96, 0] }, { t: N / 2, s: [32, 94.5, 0] }, { t: N - 1, s: [32, 96, 0] }];
+  const nod: Key[] = [{ t: 0, s: [0] }, { t: 10, s: [4] }, { t: 22, s: [-3] }, { t: N - 1, s: [0] }];
+  const blink: Key[] = [{ t: 0, s: [100, 100, 100] }, { t: 28, s: [100, 100, 100] }, { t: 30, s: [100, 10, 100] }, { t: 33, s: [100, 100, 100] }, { t: N - 1, s: [100, 100, 100] }];
+  const hat = job === 'farmer'
+    ? [group([rect(12, 14, 40, 5), rect(21, 5, 22, 10), fill([226, 196, 90])])]
+    : job === 'smith' ? [group([rect(18, 10, 28, 7), fill([60, 60, 66])])]
+      : [group([closed([[18, 16], [32, -4], [46, 16]]), fill([120, 70, 160])]), group([rect(16, 14, 32, 4), fill(trim)])];
+  return doc(64, 96, N, [
+    layer(1, N, [group([ellipse(25, 27, 5, 6), ellipse(39, 27, 5, 6), fill([40, 30, 30])])], { a: [32, 27, 0], p: [32, 27, 0], s: blink }),
+    layer(2, N, [
+      ...hat,
+      group([rect(29, 28, 6, 12), fill([190, 138, 100])]),
+      group([ellipse(32, 26, 28, 30), fill(skin)]),
+    ], { a: [32, 40, 0], p: [32, 40, 0], r: nod }),
+    layer(3, N, [
+      group([rect(14, 56, 36, 9), fill(skin)]),
+      group([rect(28, 44, 8, 50), fill(trim)]),
+      group([closed([[16, 42], [48, 42], [54, 94], [10, 94]]), fill(robe)]),
+      group([rect(18, 90, 10, 6), rect(36, 90, 10, 6), fill([60, 44, 36])]),
+    ], { a: [32, 96, 0], p: bob }),
+  ]);
+}
+
+/** Cinder: a floating fireball with a face, flames morphing around it. 24 frame loop. */
+export function cinderLottie(): string {
+  const N = 24;
+  const flameAt = (ph: number, r: number) => {
+    const v: number[][] = [], n = 9;
+    for (let k = 0; k < n; k++) { const a = (k / n) * Math.PI * 2, rr = r * (k % 2 ? 0.74 : 1.0 + Math.sin(ph + k * 1.9) * 0.2); v.push([32 + Math.cos(a) * rr, 34 + Math.sin(a) * rr * (Math.sin(a) < 0 ? 1.25 : 1)]); }
+    return shapePath(v, v.map(() => [0, 0]), v.map(() => [0, 0]));
+  };
+  const ring = (r: number, c: number[], off: number) => {
+    const keys = [];
+    for (let k = 0; k <= 4; k++) keys.push({ t: Math.min(N - 1, (k * N) / 4), s: [flameAt((k / 4) * Math.PI * 2 + off, r)], i: { x: 0.5, y: 1 }, o: { x: 0.5, y: 0 } });
+    return group([pathItem({ a: 1, k: keys }), fill(c)]);
+  };
+  return doc(64, 64, N, [layer(1, N, [
+    group([ellipse(25, 32, 5, 8), ellipse(39, 32, 5, 8), fill([60, 16, 8])]),
+    group([rect(26, 42, 12, 4), fill([60, 16, 8])]),
+    group([ellipse(32, 35, 26, 26), fill([255, 236, 150])]),
+    ring(19, [255, 170, 40], 1.3), ring(26, [235, 80, 20], 0),
+  ], { p: [{ t: 0, s: [0, 0, 0] }, { t: N / 2, s: [0, -3, 0] }, { t: N - 1, s: [0, 0, 0] }] })]);
+}
+
+/** Glitch: a tall dark figure cut into slices that jump sideways (hold keyframes), with bright eyes. 30 frame loop. */
+export function glitchLottie(): string {
+  const N = 30, layers: object[] = [];
+  layers.push(layer(1, N, [group([rect(14, 12, 7, 3), rect(27, 12, 7, 3), fill([120, 255, 240])])], { p: [{ t: 0, s: [0, 0, 0], h: 1 }, { t: 11, s: [3, 0, 0], h: 1 }, { t: 13, s: [0, 0, 0], h: 1 }, { t: N - 1, s: [0, 0, 0] }] }));
+  const slices: [number, number, number, number][] = [[10, 4, 28, 20], [16, 24, 16, 14], [8, 38, 32, 26], [6, 40, 5, 44], [37, 40, 5, 44], [14, 64, 8, 46], [26, 64, 8, 46]];
+  slices.forEach(([x, y, w, h], i) => {
+    const t0 = (i * 7) % 24, dx = i % 2 ? 5 : -4;
+    layers.push(layer(i + 2, N, [group([rect(x, y, w, h), fill(i === 2 ? [26, 20, 44] : [16, 12, 30])]), group([rect(x - 1, y - 1, w + 2, h + 2), fill([90, 110, 230])])], {
+      p: [{ t: 0, s: [0, 0, 0], h: 1 }, { t: t0, s: [dx, 0, 0], h: 1 }, { t: t0 + 2, s: [-dx * 0.5, 0, 0], h: 1 }, { t: t0 + 4, s: [0, 0, 0], h: 1 }, { t: N - 1, s: [0, 0, 0] }],
+    }));
+  });
+  return doc(48, 112, N, layers);
+}
+
+/** The Outline: nested polygons turning against each other around an eye. 60 frame loop. */
+export function outlineBossLottie(): string {
+  const N = 60, c = 80;
+  const ringLayer = (ind: number, sides: number, r: number, color: number[], turns: number) => layer(ind, N, [
+    group([poly(sides, 0, 0, r - 7), fill([10, 8, 28])]), group([poly(sides, 0, 0, r), fill(color)]),
+  ], { p: [c, c, 0], r: [{ t: 0, s: [0] }, { t: N - 1, s: [turns * (360 / sides)] }] });
+  return doc(160, 160, N, [
+    layer(1, N, [group([ellipse(0, 0, 14, 22), fill([10, 8, 28])]), group([ellipse(0, 0, 40, 28), fill([120, 255, 240])])], {
+      p: [c, c, 0], s: [{ t: 0, s: [100, 100, 100] }, { t: 40, s: [100, 100, 100] }, { t: 44, s: [100, 8, 100] }, { t: 48, s: [100, 100, 100] }, { t: N - 1, s: [100, 100, 100] }],
+    }),
+    ringLayer(2, 3, 34, [255, 214, 90], 1), ringLayer(3, 4, 52, [200, 140, 255], -1), ringLayer(4, 6, 68, [96, 120, 255], 1), ringLayer(5, 8, 78, [60, 230, 210], -1),
+  ]);
+}

@@ -113,7 +113,7 @@ const table = (mode: 'top' | 'side' | 'front'): Painter => (t) => {
     else { t.rect(4, 5, 8, 1, [150, 150, 155]); t.rect(7, 6, 1, 6, [120, 90, 50]); t.rect(5, 6, 1, 2, [150, 150, 155]); }
   }
 };
-const toolHead: Record<string, RGB> = { wood: [150, 115, 65], stone: [135, 135, 135], iron: [225, 225, 230], diamond: [90, 230, 225] };
+const toolHead: Record<string, RGB> = { wood: [150, 115, 65], stone: [135, 135, 135], iron: [225, 225, 230], diamond: [90, 230, 225], ember: [250, 120, 40] };
 const tool = (mat: string, type: string): Painter => (t) => {
   t.clear();
   const hc = toolHead[mat], stick: RGB = [120, 85, 45];
@@ -187,7 +187,36 @@ const PAINT: Record<string, Painter> = {
   },
   iron_block: metal([222, 222, 226]), gold_block: metal([250, 215, 65]), diamond_block: metal([105, 232, 225]),
   stone_bricks: (t) => { t.noise([128, 128, 128], 0.1); for (const y of [7, 15]) t.rect(0, y, 16, 1, [88, 88, 88], 0.08); t.rect(7, 0, 1, 7, [88, 88, 88]); t.rect(15, 0, 1, 7, [88, 88, 88]); t.rect(3, 8, 1, 7, [88, 88, 88]); t.rect(11, 8, 1, 7, [88, 88, 88]); },
+  // villages
+  path_top: (t) => { t.noise([150, 124, 78], 0.16); t.specks([120, 98, 60], 16); },
+  path_side: sideOverlay(dirt, [150, 124, 78]),
+  hay_top: (t) => { t.noise([214, 176, 60], 0.12); for (let r = 2; r < 7; r += 2) for (let i = r; i < 16 - r; i++) { t.px(i, r, [170, 132, 36]); t.px(i, 15 - r, [170, 132, 36]); t.px(r, i, [170, 132, 36]); t.px(15 - r, i, [170, 132, 36]); } },
+  hay_side: (t) => { t.noise([214, 176, 60], 0.14); for (let x = 1; x < 16; x += 3) t.rect(x, 0, 1, 16, [176, 138, 40], 0.1); t.rect(0, 4, 16, 2, [150, 60, 40], 0.08); t.rect(0, 10, 16, 2, [150, 60, 40], 0.08); },
+  lantern: (t) => { t.noise([255, 214, 120], 0.12); t.frame([60, 56, 52], [40, 38, 36]); t.rect(7, 0, 2, 16, [60, 56, 52]); t.rect(0, 7, 16, 2, [60, 56, 52]); },
+  // Ember Depths
+  ember_rock: (t) => { t.noise([104, 44, 40], 0.22); t.specks([70, 26, 26], 18); t.specks([140, 66, 52], 8); },
+  ash: (t) => { t.noise([92, 88, 90], 0.16); t.specks([60, 58, 60], 14); },
+  magma: (t) => { t.noise([70, 30, 24], 0.2); for (let i = 0; i < 7; i++) { let x = Math.floor(t.rng() * 16), y = Math.floor(t.rng() * 16); for (let k = 0; k < 6; k++) { t.px(x, y, t.v([255, 140, 30], 0.3)); x += Math.floor(t.rng() * 3) - 1; y += Math.floor(t.rng() * 3) - 1; } } },
+  glow_crystal: (t) => { t.noise([255, 170, 90], 0.25); t.specks([255, 236, 190], 30, 0.1); t.frame([230, 120, 50], [200, 90, 40]); },
+  ember_ore: (t) => { t.noise([104, 44, 40], 0.22); for (let i = 0; i < 6; i++) { const x = 1 + Math.floor(t.rng() * 13), y = 1 + Math.floor(t.rng() * 13); t.px(x, y, [255, 190, 60]); t.px(x + 1, y, [255, 120, 30]); if (t.rng() < 0.6) t.px(x, y + 1, [255, 230, 140]); } },
+  ember_block: metal([240, 110, 40]),
+  ember_portal: (t) => { t.noise([150, 60, 220], 0.35); t.specks([230, 170, 255], 26, 0.1); },
+  // Vector Void: dark faces with bright outlines, a world that shows its own vectors
+  void_stone: (t) => { t.noise([26, 24, 58], 0.12); t.frame([96, 110, 230], [70, 80, 190]); t.specks([60, 66, 140], 6); },
+  void_bricks: (t) => { t.noise([34, 30, 72], 0.1); for (const y of [0, 8]) t.rect(0, y, 16, 1, [120, 140, 255]); t.rect(0, 0, 1, 8, [120, 140, 255]); t.rect(8, 8, 1, 8, [120, 140, 255]); },
+  frame_top: (t) => { t.noise([34, 30, 72], 0.1); t.frame([120, 140, 255], [90, 110, 220]); t.rect(4, 4, 8, 8, [12, 10, 30]); },
+  frame_eye: (t) => { t.noise([34, 30, 72], 0.1); t.frame([120, 140, 255], [90, 110, 220]); t.rect(4, 4, 8, 8, [60, 230, 210], 0.15); t.rect(6, 6, 4, 4, [16, 40, 60]); t.px(7, 7, [230, 255, 250]); },
+  frame_side: (t) => { t.noise([34, 30, 72], 0.1); t.rect(0, 0, 16, 3, [120, 140, 255], 0.06); t.rect(0, 13, 16, 1, [70, 80, 190]); },
+  void_portal: (t) => { t.noise([8, 6, 24], 0.5); t.specks([120, 255, 240], 14, 0.2); t.specks([200, 140, 255], 10, 0.2); },
+  anchor_crystal: (t) => { t.noise([120, 255, 236], 0.3); t.frame([240, 255, 255], [60, 190, 190]); t.specks([255, 255, 255], 20, 0); },
+  trophy_top: (t) => { t.noise([34, 30, 72], 0.1); t.frame([255, 214, 90], [200, 150, 40]); t.blob(7.5, 7.5, 3.4, [255, 230, 120], 0.1); },
+  trophy_side: (t) => { t.noise([34, 30, 72], 0.1); t.frame([255, 214, 90], [200, 150, 40]); t.rect(5, 4, 6, 1, [255, 230, 120]); t.rect(4, 5, 1, 6, [255, 230, 120]); t.rect(11, 5, 1, 6, [255, 230, 120]); t.rect(5, 11, 6, 1, [255, 230, 120]); t.rect(7, 7, 2, 2, [120, 255, 236]); },
   // items
+  igniter: (t) => { t.clear(); t.rect(3, 9, 7, 4, [150, 150, 158], 0.06); t.rect(3, 9, 2, 4, [110, 110, 118]); for (let i = 0; i < 5; i++) t.px(9 + i, 8 - i, [60, 60, 64]); t.rect(11, 2, 3, 3, [255, 190, 60], 0.2); t.px(12, 1, [255, 240, 170]); },
+  ember_ingot: ingot([240, 110, 40]),
+  vector_eye: (t) => { t.clear(); t.blob(7.5, 7.5, 5.6, [30, 40, 90], 0.1); t.blob(7.5, 7.5, 3.8, [70, 230, 210], 0.12); t.blob(7.5, 7.5, 1.6, [10, 20, 40], 0); t.px(6, 6, [235, 255, 250]); },
+  bread: (t) => { t.clear(); t.blob(7.5, 9, 5, [196, 140, 60], 0.1); t.rect(3, 8, 10, 4, [214, 160, 76], 0.08); for (const x of [5, 8, 11]) t.rect(x, 7, 1, 3, [150, 100, 40]); },
+  wheat: (t) => { t.clear(); for (const [x, h] of [[5, 10], [8, 12], [11, 9]]) { t.rect(x, 15 - h, 1, h, [190, 160, 60]); t.rect(x - 1, 15 - h, 3, 4, [232, 200, 80], 0.12); } },
   stick: (t) => { t.clear(); for (let i = 0; i < 11; i++) { t.px(3 + i, 13 - i, [125, 90, 48]); t.px(4 + i, 13 - i, [90, 62, 30]); } },
   coal: (t) => { t.clear(); t.blob(7.5, 8, 4.6, [38, 38, 40], 0.5); },
   iron_ingot: ingot([222, 222, 226]), gold_ingot: ingot([250, 215, 65]),

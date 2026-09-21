@@ -14,7 +14,7 @@
 import { B, BLOCKS, DIR_O, DIR_SHADE, DIR_U, DIR_V, LAMP_MUL, SKY_MUL, palette } from './blocks';
 import { CS, FACE_STRIDE, PLANT_STRIDE, WH, World } from './world';
 import { clamp, mulberry32 } from './math';
-import { CLOUD_VARIANTS, MOON_PHASES, cloudSvg, moonSvg, sunSvg } from './svg';
+import { CLOUD_VARIANTS, MOON_PHASES, auroraSvg, cloudSvg, moonSvg, planetSvg, sunSvg } from './svg';
 import { Tex, TexLod, texture } from './textures';
 
 const MAX_POLYS = 131072;
@@ -27,6 +27,9 @@ const AO_DIST = 38;
 const PLANT_DIST = 36;
 const HAND_ORDER = 1023;
 const CLOUD_POOL = 14;
+/** Camera-space scratch size; bounds the vertex count of free-form polygons (Lottie outlines). */
+const SCRATCH = 256;
+export const MAX_POLY_VERTS = SCRATCH - 8;
 const AO_W = 0.2;
 
 export const enum Layer { TERRAIN = 0, DECAL = 1, AO = 2, ENTITY = 3 }
@@ -56,6 +59,8 @@ export interface Environment {
   /** Direction to the sun, unit vector. */
   sunDir: [number, number, number];
   night: number; // 0 day .. 1 night
+  /** Which sky to draw: the overworld's sun, moon and clouds, the closed Ember Depths, or the Void's planet and aurora. */
+  skyKind: 'normal' | 'ember' | 'void';
   /** 0 = full moon .. 4 = new moon .. 7 */
   moonPhase: number;
   time: number; // seconds, for animation
@@ -65,7 +70,10 @@ export interface Environment {
 export interface RenderStats { polys: number; shapes: number; chunks: number; collectMs: number; emitMs: number }
 
 /** What the first person hand holds: a block id, a flat item sprite, or nothing (bare arm). */
-export interface HeldView { block: number; sprite: Tex | null; swing: number; bobX: number; bobY: number; drop: number; sky: number; lamp: number }
+export interface HeldView { flat: { shapes: FlatShape[]; w: number; h: number } | null; block: number; sprite: Tex | null; swing: number; bobX: number; bobY: number; drop: number; sky: number; lamp: number }
+
+/** One flattened, colored outline set of a vector animation frame, in composition pixels (y down). */
+export interface FlatShape { r: number; g: number; b: number; a: number; polys: Float32Array[]; /** Stroke geometry (many small quads): gets no side walls when extruded. */ stroke?: boolean }
 
 type TVGNS = any;
 type RGB = readonly [number, number, number];
@@ -104,6 +112,7 @@ export class Renderer3D {
   private usedLast = 0;
   private skyShape: any; private starShape: any; private sunGlow: any;
   // SVG pictures
+  private planetPic: any; private auroraPics: any[] = [];
   private sunPic: any; private moonPics: any[] = []; private cloudScene: any; private cloudPics: any[][] = []; private cloudKey = '';
   private outline: any;
 
@@ -117,7 +126,7 @@ export class Renderer3D {
   private vtop = 0;
 
   // Scratch
-  private cxs = new Float64Array(8); private cys = new Float64Array(8); private czs = new Float64Array(8);
+  private cxs = new Float64Array(SCRATCH); private cys = new Float64Array(SCRATCH); private czs = new Float64Array(SCRATCH);
   private tx = new Float64Array(8); private ty = new Float64Array(8); private tz = new Float64Array(8);
   // Camera-space basis of the quad currently being textured: origin, u edge, v edge.
   private q = new Float64Array(9);
@@ -141,6 +150,8 @@ export class Renderer3D {
     this.sunGlow = new TVG.Shape();
     const svg = (src: string, parent: any) => { const p = new TVG.Picture(); p.load(src, { type: 'svg' }); p.visible(false); parent.add(p); return p; };
     this.skyScene.add(this.skyShape).add(this.starShape).add(this.sunGlow);
+    for (let i = 0; i < 3; i++) this.auroraPics.push(svg(auroraSvg(i), this.skyScene));
+    this.planetPic = svg(planetSvg(), this.skyScene);
     this.sunPic = svg(sunSvg(), this.skyScene);
     for (let i = 0; i < MOON_PHASES; i++) this.moonPics.push(svg(moonSvg(i), this.skyScene));
     // Clouds live in their own scene so a tint effect can recolor them for dusk and night.
@@ -160,6 +171,12 @@ export class Renderer3D {
   }
 
   // ------------------------------------------------------------------ frame lifecycle
+
+  /** How 2D vector art enters the world: a camera facing card, or an extruded, layered cutout with a real orientation. */
+  flatMode: 'extrude' | 'card' = 'extrude';
+
+  /** Camera yaw of the current frame. */
+  get viewYaw() { return this.cam.yaw; }
 
   begin(cam: Camera, time: number) {
     this.cam = cam;
@@ -188,7 +205,7 @@ export class Renderer3D {
    * that many pixels to hide anti-aliasing seams between adjacent faces.
    */
   private pushPoly(n: number, order: number, sub: number, fog: number, color: number, grow: number): boolean {
-    if (this.count >= MAX_POLYS || this.vtop + 24 > this.verts.length) return false;
+    if (this.count >= MAX_POLYS || this.vtop + n * 2 + 8 > this.verts.length) return false;
     const c = this.cam, xs = this.cxs, ys = this.cys, zs = this.czs, v = this.verts;
     let behind = 0;
     for (let i = 0; i < n; i++) if (zs[i] < NEAR) behind++;
@@ -557,6 +574,134 @@ export class Renderer3D {
     }
   }
 
+  /**
+   * Projects a flattened 2D vector frame (see lottie3d.ts) into the world as an upright card that turns toward the
+   * camera around the Y axis. Every outline goes through the same clipping, depth bucketing, lighting and fog as the
+   * blocks, so the 2D artwork is occluded by terrain and darkens at night like any other entity.
+   * (x, y, z) is the bottom center, `height` is in blocks, `cw` x `ch` the composition size.
+   */
+  drawFlat(shapes: FlatShape[], cw: number, ch: number, x: number, y: number, z: number, height: number, flip: boolean, sky: number, lamp: number, flash = 0, alpha = 1) {
+    const cam = this.cam;
+    const dist = Math.hypot(x - cam.x, y + height / 2 - cam.y, z - cam.z);
+    if (dist > this.renderDistance) return;
+    this.tx[0] = x; this.ty[0] = y; this.tz[0] = z;
+    this.toCamera(1);
+    const bx = this.cxs[0], by = this.cys[0], bz = this.czs[0];
+    if (bz < -height) return;
+    // The card is vertical in the world: its up axis picks up the camera pitch, its right axis is the camera's.
+    const k = height / ch, upY = cam.cosP * k, upZ = cam.sinP * k, kx = flip ? -k : k;
+    const bucket = Math.min(MAX_BUCKET, Math.abs(Math.floor(x) - this.camCell[0]) + Math.abs(Math.floor(y + height / 2) - this.camCell[1]) + Math.abs(Math.floor(z) - this.camCell[2]));
+    const order = (MAX_BUCKET - bucket) * 4 + Layer.ENTITY;
+    // Artwork order must survive the sort: the distance picks a band of 256 sub keys, the shape index its slot in it.
+    const band = (255 - Math.min(255, Math.floor((dist / (this.renderDistance + 2)) * 255))) * 256;
+    const fog = this.fogLevel(dist);
+    const xs = this.cxs, ys = this.cys, zs = this.czs, half = cw / 2;
+    for (let i = 0; i < shapes.length; i++) {
+      const sh = shapes[i];
+      let r = sh.r, g = sh.g, b = sh.b;
+      if (flash > 0) { r = Math.min(255, r + 140); g *= 0.45; b *= 0.45; }
+      const color = palette.id(r, g, b, Math.round(sh.a * alpha), sky, lamp);
+      const sub = band + Math.min(255, i);
+      for (const poly of sh.polys) {
+        const n = poly.length >> 1;
+        for (let v = 0; v < n; v++) {
+          const du = (poly[v * 2] - half) * kx, dv = ch - poly[v * 2 + 1];
+          xs[v] = bx + du; ys[v] = by + dv * upY; zs[v] = bz + dv * upZ;
+        }
+        this.pushPoly(n, order, sub, fog, color, 0);
+      }
+    }
+  }
+
+  /**
+   * The 3D version of drawFlat. The artwork stands on a plane with a real orientation (`yaw`, facing like a mob),
+   * every shape becomes a slab with side walls, and the slabs are stacked front to back in artwork order. So the
+   * picture has thickness, its layers show parallax, and it can be walked around (the back is a darker mirror image).
+   *
+   * Visibility inside the stack is solved the same way as for blocks, by order: slabs are drawn from the far side
+   * to the near side of the camera, walls before the cap that hides their inner halves.
+   */
+  drawExtruded(shapes: FlatShape[], cw: number, ch: number, x: number, y: number, z: number, height: number, yaw: number, sky: number, lamp: number, flash = 0, alpha = 1) {
+    const cam = this.cam, n = shapes.length;
+    if (!n) return;
+    const dist = Math.hypot(x - cam.x, y + height / 2 - cam.y, z - cam.z);
+    if (dist > this.renderDistance) return;
+    // Far away the thickness is below a pixel; the flat card is indistinguishable and much cheaper.
+    if (dist > 26) { this.drawFlat(shapes, cw, ch, x, y, z, height, Math.sin(yaw - cam.yaw) > 0.15, sky, lamp, flash, alpha); return; }
+    this.tx[0] = x; this.ty[0] = y; this.tz[0] = z;
+    this.toCamera(1);
+    const bx = this.cxs[0], by = this.cys[0], bz = this.czs[0];
+    if (bz < -height - 1) return;
+
+    // Art axes in world space: normal = facing direction, u = to the viewer's right when seen from the front.
+    const sy = Math.sin(yaw), cy = Math.cos(yaw), k = height / ch;
+    const nx = -sy, nz = -cy;
+    const front = nx * (cam.x - x) + nz * (cam.z - z) > 0;
+    // Same axes in camera space (rotation only).
+    const rot = (dx: number, dy: number, dz: number, out: number[]) => {
+      const zt = -dx * cam.sinY - dz * cam.cosY;
+      out[0] = dx * cam.cosY - dz * cam.sinY; out[1] = dy * cam.cosP - zt * cam.sinP; out[2] = zt * cam.cosP + dy * cam.sinP;
+    };
+    rot(-cy * k, 0, sy * k, AX_U); rot(0, k, 0, AX_V); rot(nx, 0, nz, AX_N);
+
+    const spread = Math.min(0.45, height * 0.22), slab = spread / n;
+    const bucket = Math.min(MAX_BUCKET, Math.abs(Math.floor(x) - this.camCell[0]) + Math.abs(Math.floor(y + height / 2) - this.camCell[1]) + Math.abs(Math.floor(z) - this.camCell[2]));
+    const order = (MAX_BUCKET - bucket) * 4 + Layer.ENTITY;
+    const band = (127 - Math.min(127, Math.floor((dist / (this.renderDistance + 2)) * 127))) * 512;
+    const fog = this.fogLevel(dist);
+    const xs = this.cxs, ys = this.cys, zs = this.czs, half = cw / 2;
+    let slot = 0;
+    const a255 = (a: number) => Math.round(a * alpha);
+
+    for (let step = 0; step < n; step++) {
+      // Artwork order is back to front; walk it away from the camera first.
+      const i = front ? step : n - 1 - step, sh = shapes[i];
+      let r = sh.r, g = sh.g, b = sh.b;
+      if (flash > 0) { r = Math.min(255, r + 140); g *= 0.45; b *= 0.45; }
+      const dFront = (i + 1) * slab - spread / 2, dBack = dFront - slab;
+      const capD = front ? dFront : dBack, capK = front ? 1 : 0.62;
+      const sub = band + Math.min(511, slot);
+      slot += 2;
+
+      if (!sh.stroke && sh.a > 40) {
+        for (const poly of sh.polys) {
+          const m = poly.length >> 1;
+          // Signed area tells which side of an edge is outside, for a touch of top-down shading on the walls.
+          let area = 0;
+          for (let v = 0; v < m; v++) { const w = (v + 1) % m; area += poly[v * 2] * poly[w * 2 + 1] - poly[w * 2] * poly[v * 2 + 1]; }
+          const sgn = area > 0 ? 1 : -1;
+          for (let v = 0; v < m; v++) {
+            const w = (v + 1) % m;
+            const u0 = (poly[v * 2] - half), v0 = ch - poly[v * 2 + 1], u1 = (poly[w * 2] - half), v1 = ch - poly[w * 2 + 1];
+            const ex = u1 - u0, ey = v1 - v0, len = Math.hypot(ex, ey);
+            if (len < 0.35) continue;
+            const up = (-ex / len) * sgn; // +1 when the wall faces up
+            const kw = 0.7 + up * 0.2;
+            const px0 = bx + AX_U[0] * u0 + AX_V[0] * v0, py0 = by + AX_U[1] * u0 + AX_V[1] * v0, pz0 = bz + AX_U[2] * u0 + AX_V[2] * v0;
+            const px1 = bx + AX_U[0] * u1 + AX_V[0] * v1, py1 = by + AX_U[1] * u1 + AX_V[1] * v1, pz1 = bz + AX_U[2] * u1 + AX_V[2] * v1;
+            xs[0] = px0 + AX_N[0] * dFront; ys[0] = py0 + AX_N[1] * dFront; zs[0] = pz0 + AX_N[2] * dFront;
+            xs[1] = px1 + AX_N[0] * dFront; ys[1] = py1 + AX_N[1] * dFront; zs[1] = pz1 + AX_N[2] * dFront;
+            xs[2] = px1 + AX_N[0] * dBack; ys[2] = py1 + AX_N[1] * dBack; zs[2] = pz1 + AX_N[2] * dBack;
+            xs[3] = px0 + AX_N[0] * dBack; ys[3] = py0 + AX_N[1] * dBack; zs[3] = pz0 + AX_N[2] * dBack;
+            this.pushPoly(4, order, sub, fog, palette.id(r * kw, g * kw, b * kw, a255(sh.a), sky, lamp), 0.3);
+          }
+        }
+      }
+
+      const capColor = palette.id(r * capK, g * capK, b * capK, a255(sh.a), sky, lamp);
+      for (const poly of sh.polys) {
+        const m = poly.length >> 1;
+        for (let v = 0; v < m; v++) {
+          const du = poly[v * 2] - half, dv = ch - poly[v * 2 + 1];
+          xs[v] = bx + AX_U[0] * du + AX_V[0] * dv + AX_N[0] * capD;
+          ys[v] = by + AX_U[1] * du + AX_V[1] * dv + AX_N[1] * capD;
+          zs[v] = bz + AX_U[2] * du + AX_V[2] * dv + AX_N[2] * capD;
+        }
+        this.pushPoly(m, order, sub + 1, fog, capColor, 0);
+      }
+    }
+  }
+
   /** Upright, camera-facing sprite (dropped non-block items). */
   drawSpriteBillboard(x: number, y: number, z: number, size: number, tex: Tex, sky: number, lamp = 0) {
     const cam = this.cam;
@@ -611,6 +756,22 @@ export class Renderer3D {
       const y2 = ly * c2 - z1 * s2, z2 = ly * s2 + z1 * c2;
       hx[i] = (ox + x1) / fovK; hy[i] = (oy + y2) / fovK; hz[i] = oz + z2;
     };
+
+    if (hv.flat) {
+      // A Lottie item: its flattened outlines are mapped onto the same card a sprite item uses.
+      const s = 0.66, ry = 0.6, rx = -0.12, up = 0.1;
+      place(-s / 2, s / 2 + up, 0, ry, rx, 0); place(s / 2, s / 2 + up, 0, ry, rx, 1); place(s / 2, -s / 2 + up, 0, ry, rx, 2); place(-s / 2, -s / 2 + up, 0, ry, rx, 3);
+      const q0x = hx[0], q0y = hy[0], q0z = hz[0], ux = hx[1] - q0x, uy = hy[1] - q0y, uz = hz[1] - q0z, vx = hx[3] - q0x, vy = hy[3] - q0y, vz = hz[3] - q0z;
+      hv.flat.shapes.forEach((sh, i) => {
+        const id = palette.id(sh.r, sh.g, sh.b, sh.a, hv.sky, Math.max(hv.lamp, 1));
+        for (const poly of sh.polys) {
+          const n = poly.length >> 1;
+          for (let k = 0; k < n; k++) { const u = poly[k * 2] / hv.flat!.w, v = poly[k * 2 + 1] / hv.flat!.h; xs[k] = q0x + ux * u + vx * v; ys[k] = q0y + uy * u + vy * v; zs[k] = q0z + uz * u + vz * v; }
+          this.pushPoly(n, HAND_ORDER, 1 + i, 0, id, 0);
+        }
+      });
+      return;
+    }
 
     if (hv.sprite) {
       // A flat item held upright and slightly turned inwards.
@@ -738,7 +899,8 @@ export class Renderer3D {
       const lr = Math.max(env.sun[0] * skyL, lampL), lg = Math.max(env.sun[1] * skyL, lampL * 0.93), lb = Math.max(env.sun[2] * skyL, lampL * 0.78);
       let r = pal.r[color] * lr, g = pal.g[color] * lg, b = pal.b[color] * lb;
       r += (env.fog[0] - r) * ft; g += (env.fog[1] - g) * ft; b += (env.fog[2] - b) * ft;
-      shape.fill(r | 0, g | 0, b | 0, pal.a[color]);
+      // Sunrise and dusk push the red light factor above 1; clamp, or a 255 channel wraps around to 0.
+      shape.fill(r > 255 ? 255 : r | 0, g > 255 ? 255 : g | 0, b > 255 ? 255 : b | 0, pal.a[color]);
     }
     for (let k = used; k < this.usedLast; k++) this.pool[k].reset();
     this.usedLast = used;
@@ -784,11 +946,28 @@ export class Renderer3D {
       this.starShape.fill(255, 255, 240, Math.floor(clamp((env.night - 0.25) * 1.6, 0, 1) * 230));
     }
 
+    // The Void: a ringed planet and drifting aurora bands, all SVG pictures placed by direction.
+    const inVoid = env.skyKind === 'void';
+    this.planetPic.visible(false);
+    for (const a of this.auroraPics) a.visible(false);
+    if (inVoid) {
+      const pl = this.projectDir(0.52, 0.42, -0.74);
+      if (pl) { const w = c.focal * 0.95, h = w * 0.625; this.planetPic.visible(true).size(w, h).translate(pl[0] - w / 2, pl[1] - h / 2); }
+      for (let i = 0; i < 3; i++) {
+        const az = i * 2.1 + env.time * 0.01, el = 0.5 + i * 0.12 + Math.sin(env.time * 0.2 + i) * 0.04;
+        const p = this.projectDir(Math.cos(az) * Math.cos(el), Math.sin(el), Math.sin(az) * Math.cos(el));
+        if (!p) continue;
+        const w = c.focal * (2.2 + Math.sin(env.time * 0.13 + i * 2) * 0.25), h = w * (0.3 + Math.sin(env.time * 0.17 + i) * 0.04);
+        this.auroraPics[i].visible(true).size(w, h).translate(p[0] - w / 2, p[1] - h / 2).opacity(Math.floor(150 + Math.sin(env.time * 0.4 + i * 1.7) * 70));
+      }
+    }
+    const openSky = env.skyKind === 'normal';
+
     // Sun and moon are SVG pictures placed in screen space.
     const sd = env.sunDir;
     const sun = this.projectDir(sd[0], sd[1], sd[2]);
     this.sunGlow.reset();
-    const sunUp = !!sun && sd[1] > -0.12;
+    const sunUp = openSky && !!sun && sd[1] > -0.12;
     if (sunUp) {
       const s = c.focal * 0.2;
       const glow = new TVG.RadialGradient(sun![0], sun![1], s * 1.9);
@@ -798,14 +977,14 @@ export class Renderer3D {
     }
     this.sunPic.visible(sunUp);
     const moon = this.projectDir(-sd[0], -sd[1], -sd[2]);
-    const moonUp = !!moon && -sd[1] > -0.12;
+    const moonUp = openSky && !!moon && -sd[1] > -0.12;
     for (let i = 0; i < MOON_PHASES; i++) this.moonPics[i].visible(moonUp && i === env.moonPhase);
     if (moonUp) { const s = c.focal * 0.17; this.moonPics[env.moonPhase].size(s, s).translate(moon![0] - s / 2, moon![1] - s / 2); }
 
     // Cloud layer: SVG pictures scattered on a drifting grid high above the world, scaled by depth.
     const CY = WH + 34, cell = 56, reach = 5, maxD = cell * (reach + 0.5);
     const used = [0, 0, 0];
-    if (c.y < CY - 2) {
+    if (openSky && c.y < CY - 2) {
       const drift = env.time * 1.1;
       const bx = Math.floor((c.x - drift) / cell), bz = Math.floor(c.z / cell);
       for (let gz = -reach; gz <= reach; gz++) for (let gx = -reach; gx <= reach; gx++) {
@@ -859,6 +1038,7 @@ export class Renderer3D {
 }
 
 const ZERO: readonly [number, number, number] = [0, 0, 0];
+const AX_U = [0, 0, 0], AX_V = [0, 0, 0], AX_N = [0, 0, 0];
 const hx = new Float64Array(8), hy = new Float64Array(8), hz = new Float64Array(8);
 const boxWX: number[] = new Array(8).fill(0), boxWY: number[] = new Array(8).fill(0), boxWZ: number[] = new Array(8).fill(0);
 
