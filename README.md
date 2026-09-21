@@ -38,4 +38,8 @@ URL parameters: `renderer=gl|wg|sw`, `seed=abc`, `dist=64` (fixed view distance)
 - Day/night cycle with gradient sky, sun, moon, stars, clouds, sunset tint and distance fog
 - First person hand with the held block or item, third person avatar, particles, item drops, collectible gems,
   minimap, synthesized per-material sound
+- ThorVG showcase: scene post effects (pause blur, underwater / lava / night / hurt tint), light halos with voxel
+  occlusion tests, Lottie driven HUD (hearts that crack and beat, furnace flame and trim path progress arrow) and Lottie
+  billboards in the world (mob alerts, creeper fuse rings, gem sparkles), SVG sun, moon phases and tinted SVG clouds,
+  clip masked round minimap, trim path mining ring, gradient text logo. `?nofx` turns the effects off
 - World edits, inventory, furnaces and player state persist in `localStorage`

@@ -89,6 +89,8 @@ export class Mob implements Body {
   private heading = Math.random() * 6.28; private moveTimer = 0; private moving = false; private attackTimer = 0; burnTimer = 0;
   /** Creeper countdown, explodes at 1.5 s. */
   fuse = 0;
+  /** Seconds since a hostile mob noticed the player; drives the "!" billboard. -1 when idle. */
+  alert = -1;
   dead = false;
 
   constructor(public kind: MobKind, public x: number, public y: number, public z: number) {
@@ -104,7 +106,9 @@ export class Mob implements Body {
     const dx = player.x - this.x, dz = player.z - this.z, dy = player.y - this.y;
     const dist = Math.hypot(dx, dz);
 
-    if (info.hostile && !player.creative && !player.dead && dist < 24 && Math.abs(dy) < 8) {
+    const hunting = info.hostile && !player.creative && !player.dead && dist < 24 && Math.abs(dy) < 8;
+    this.alert = hunting ? (this.alert < 0 ? 0 : this.alert + dt) : -1;
+    if (hunting) {
       this.heading = Math.atan2(-dx, -dz);
       this.moving = dist > 0.9;
       if (this.kind === 'creeper') {

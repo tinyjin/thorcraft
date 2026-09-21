@@ -5,6 +5,7 @@ import wasmUrl from '../node_modules/@thorvg/webcanvas/dist/thorvg.wasm?url';
 import { Sfx } from './audio';
 import { B, BLOCKS, CUBE, I, ITEMS, REPLACEABLE, SOLID, TOOL_SPEED, isBlockId } from './blocks';
 import { EntityManager, MODELS, Mob, MobKind } from './entities';
+import { Fx } from './fx';
 import { Hud, HudInfo, Settings, WindowKind } from './hud';
 import { Input } from './input';
 import { Furnace, HOTBAR, Inventory, Stack, WindowState, makeStack, tickFurnace } from './inventory';
@@ -23,7 +24,7 @@ const DAY_LENGTH = 720; // seconds
 
 interface SaveData {
   seedText: string; edits: Record<string, number[]>; creative: boolean; time: number; gems: number; collected: string[];
-  spawn: [number, number];
+  spawn: [number, number]; days?: number;
   player: { x: number; y: number; z: number; yaw: number; pitch: number; health: number };
   inv: (Stack | null)[]; selected: number; furnaces: Furnace[];
 }
@@ -48,6 +49,8 @@ async function boot() {
 
   const fontData = new Uint8Array(await (await fetch('/font.ttf')).arrayBuffer());
   TVG.Font.load('ui', fontData, { type: 'ttf' });
+  // The same font is registered with the browser so the HUD can measure text exactly.
+  try { const face = new FontFace('thorcraft-ui', fontData.buffer.slice(0) as ArrayBuffer); await face.load(); document.fonts.add(face); } catch { /* falls back to an estimate */ }
 
   let W = window.innerWidth, H = window.innerHeight;
   // The software rasterizer pays per pixel, so keep it at 1x.
@@ -64,7 +67,12 @@ async function boot() {
   sfx.volume = settings.vol / 10;
   const r3d = new Renderer3D(TVG);
   const hud = new Hud(TVG, input, 'ui');
-  canvas.add(r3d.skyScene).add(r3d.scene).add(r3d.overlayScene).add(hud.scene);
+  // Sky, terrain and overlays share one scene so post effects (blur, tint) cover the whole 3D view.
+  const worldScene = new TVG.Scene();
+  worldScene.add(r3d.skyScene).add(r3d.scene).add(r3d.overlayScene);
+  const fx = new Fx(TVG, worldScene);
+  if (params.has('nofx')) fx.enabled = false;
+  canvas.add(worldScene).add(fx.billboardScene).add(fx.scene).add(hud.scene);
 
   const cam = new Camera();
   const player = new Player();
@@ -80,6 +88,7 @@ async function boot() {
   let seedText = '';
   let spawn: [number, number] = [8, 8];
   let dayTime = 0.08; // 0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight
+  let dayCount = 0; // full days survived, picks the moon phase
   let gems = 0;
   let clock = 0;
   let cameraMode = 0; // 0 first person, 1 behind, 2 front
@@ -106,7 +115,7 @@ async function boot() {
     pickup: (id: number, count: number, dur?: number) => inv.add(id, count, dur),
     canPickup: (id: number) => inv.canAdd(id, 1),
     sound: (n: 'pop' | 'gem' | 'explode' | 'fuse' | 'hit' | 'mob') => sfx[n](),
-    shake: (a: number) => { shake = Math.max(shake, a); },
+    shake: (a: number) => { shake = Math.max(shake, a); fx.burst(a); },
     gemCollected: () => { gems++; say(`Gem found! (${gems})`); },
     blockDestroyed: (x: number, y: number, z: number, id: number) => { if (id === B.FURNACE || id === B.FURNACE_LIT) spillFurnace(x, y, z); },
   };
@@ -123,7 +132,7 @@ async function boot() {
   const writeSave = () => {
     if (!entities || state === 'title' || state === 'loading') return;
     const data: SaveData = {
-      seedText, edits: world.serializeEdits(), creative, time: dayTime, gems, collected: [...entities.collectedGems], spawn,
+      seedText, edits: world.serializeEdits(), creative, time: dayTime, days: dayCount, gems, collected: [...entities.collectedGems], spawn,
       player: { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch, health: player.dead ? 20 : player.health },
       inv: inv.slots, selected: inv.selected, furnaces: [...furnaces.values()],
     };
@@ -155,7 +164,7 @@ async function boot() {
     furnaces = new Map();
     if (save) {
       world.loadEdits(save.edits);
-      creative = save.creative; dayTime = save.time; gems = save.gems; spawn = save.spawn ?? [8, 8];
+      creative = save.creative; dayTime = save.time; dayCount = save.days ?? 0; gems = save.gems; spawn = save.spawn ?? [8, 8];
       entities.collectedGems = new Set(save.collected);
       inv.load(save.inv, save.selected);
       for (const f of save.furnaces ?? []) furnaces.set(fkey(f.x, f.y, f.z), f);
@@ -164,7 +173,7 @@ async function boot() {
       player.health = save.player.health > 0 ? save.player.health : 20;
       player.dead = false;
     } else {
-      creative = newCreative; dayTime = 0.08; gems = 0;
+      creative = newCreative; dayTime = 0.08; dayCount = 0; gems = 0;
       if (creative) [B.GRASS, B.STONE, B.PLANKS, B.LOG, B.GLASS, B.BRICK, B.TORCH, B.TNT, B.GLOWSTONE].forEach((id, i) => (inv.slots[i] = makeStack(id, 64)));
       spawn = findSpawn(world);
       player.spawnAt(world, spawn[0], spawn[1]);
@@ -185,7 +194,7 @@ async function boot() {
 
   // ------------------------------------------------------------------ environment
 
-  const env: Environment = { sun: [1, 1, 1], fog: [176, 208, 245], zenith: [70, 130, 230], sunDir: [0, 1, 0], night: 0, time: 0, underwater: false };
+  const env: Environment = { sun: [1, 1, 1], fog: [176, 208, 245], zenith: [70, 130, 230], sunDir: [0, 1, 0], night: 0, moonPhase: 0, time: 0, underwater: false };
 
   const updateEnv = () => {
     const a = dayTime * Math.PI * 2;
@@ -205,6 +214,7 @@ async function boot() {
       env.zenith = env.fog;
     }
     env.time = clock;
+    env.moonPhase = dayCount % 8;
   };
 
   // ------------------------------------------------------------------ interaction
@@ -469,7 +479,8 @@ async function boot() {
 
     const sim = playing || state === 'window' || state === 'dead';
     if (sim) {
-      dayTime = (dayTime + dt / DAY_LENGTH) % 1;
+      dayTime += dt / DAY_LENGTH;
+      if (dayTime >= 1) { dayTime -= 1; dayCount++; }
       if (playing && input.locked) player.look(input, settings.sens * 0.00024);
       player.update(world, input, dt, clock, playing);
       if (playing) interact(dt); else { mining.active = false; target = null; }
@@ -516,6 +527,18 @@ async function boot() {
       if (playing && target) r3d.drawSelection(target.x, target.y, target.z);
       else r3d.clearSelection();
     }
+    // Lottie billboards in the world: alerts over hunting mobs, creeper fuse rings, gem sparkles.
+    fx.beginBillboards();
+    if (state !== 'loading' && fx.enabled) {
+      for (const m of entities.mobs) {
+        if (m.fuse > 0) fx.billboard('fuse', world, cam, m.x, m.y + m.h * 0.55, m.z, clock, 1.9);
+        else if (m.alert >= 0 && m.alert < 1.2) fx.billboard('alert', world, cam, m.x, m.y + m.h + 0.45, m.z, m.alert, 0.7);
+      }
+      for (const g of entities.gems.values()) fx.billboard('sparkle', world, cam, g.x, g.y + 0.3 + Math.sin(clock * 2 + g.x) * 0.15, g.z, clock + g.x * 0.37, 1.3);
+    }
+    fx.endBillboards();
+    fx.lights(world, cam, env, dt, state !== 'loading');
+    fx.post({ menuOpen: state === 'paused' || state === 'window' || state === 'dead', underwater: env.underwater, inLava: player.inLava && state !== 'title', hurt: state === 'title' ? 0 : player.hurtTimer, night: env.night }, dt);
 
     // --- HUD and menus
     toastTimer = Math.max(0, toastTimer - dt);
@@ -536,7 +559,7 @@ async function boot() {
     }
     const info: HudInfo = {
       fps, debug: debug && inGame, debugLines, gems, toast, toastAlpha: Math.min(1, toastTimer), nameAlpha: Math.min(1, nameTimer * 2),
-      timeOfDay: dayTime, inLava: player.inLava,
+      timeOfDay: dayTime, inLava: player.inLava, breakProgress: playing && mining.active ? mining.progress : 0, fxOn: fx.enabled,
     };
 
     hud.setMinimapVisible(inGame && showMap);
@@ -607,10 +630,10 @@ async function boot() {
 
   (window as any).__game = {
     get state() { return state; }, player, get inv() { return inv; }, r3d, cam, settings, input, get world() { return world; }, get entities() { return entities; },
-    setTime: (t: number) => { dayTime = t; }, setState: (s: State) => { state = s; }, open: (k: WindowKind) => openWindow(k),
+    setTime: (t: number) => { dayTime = t; }, setDay: (d: number) => { dayCount = d; }, setState: (s: State) => { state = s; }, open: (k: WindowKind) => openWindow(k),
     give: (id: number, n = 1) => inv.add(id, n), win, furnaces: () => furnaces,
     spawn: (kind: MobKind, dx: number, dz: number) => { const x = Math.floor(player.x + dx), z = Math.floor(player.z + dz); entities.mobs.push(new Mob(kind, x + 0.5, world.surfaceY(x, z), z + 0.5)); },
-    setCamera: (m: number) => { cameraMode = m; }, stats: () => ({ fps, frameAvg, ...r3d.stats }),
+    setCamera: (m: number) => { cameraMode = m; }, fx, worldScene, TVG, canvas, stats: () => ({ fps, frameAvg, ...r3d.stats }),
   };
   requestAnimationFrame(frame);
 }

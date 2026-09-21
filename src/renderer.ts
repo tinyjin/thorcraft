@@ -14,6 +14,7 @@
 import { B, BLOCKS, DIR_O, DIR_SHADE, DIR_U, DIR_V, LAMP_MUL, SKY_MUL, palette } from './blocks';
 import { CS, FACE_STRIDE, PLANT_STRIDE, WH, World } from './world';
 import { clamp, mulberry32 } from './math';
+import { CLOUD_VARIANTS, MOON_PHASES, cloudSvg, moonSvg, sunSvg } from './svg';
 import { Tex, TexLod, texture } from './textures';
 
 const MAX_POLYS = 131072;
@@ -25,6 +26,7 @@ const LOD_DIST = [5, 11, 20, 31];
 const AO_DIST = 38;
 const PLANT_DIST = 36;
 const HAND_ORDER = 1023;
+const CLOUD_POOL = 14;
 const AO_W = 0.2;
 
 export const enum Layer { TERRAIN = 0, DECAL = 1, AO = 2, ENTITY = 3 }
@@ -54,6 +56,8 @@ export interface Environment {
   /** Direction to the sun, unit vector. */
   sunDir: [number, number, number];
   night: number; // 0 day .. 1 night
+  /** 0 = full moon .. 4 = new moon .. 7 */
+  moonPhase: number;
   time: number; // seconds, for animation
   underwater: boolean;
 }
@@ -98,7 +102,9 @@ export class Renderer3D {
   private TVG: TVGNS;
   private pool: any[] = [];
   private usedLast = 0;
-  private skyShape: any; private sunShape: any; private moonShape: any; private starShape: any; private cloudShape: any; private sunGlow: any;
+  private skyShape: any; private starShape: any; private sunGlow: any;
+  // SVG pictures
+  private sunPic: any; private moonPics: any[] = []; private cloudScene: any; private cloudPics: any[][] = []; private cloudKey = '';
   private outline: any;
 
   // Per-frame polygon store
@@ -133,10 +139,14 @@ export class Renderer3D {
     this.skyShape = new TVG.Shape();
     this.starShape = new TVG.Shape();
     this.sunGlow = new TVG.Shape();
-    this.sunShape = new TVG.Shape();
-    this.moonShape = new TVG.Shape();
-    this.cloudShape = new TVG.Shape();
-    this.skyScene.add(this.skyShape).add(this.starShape).add(this.sunGlow).add(this.sunShape).add(this.moonShape).add(this.cloudShape);
+    const svg = (src: string, parent: any) => { const p = new TVG.Picture(); p.load(src, { type: 'svg' }); p.visible(false); parent.add(p); return p; };
+    this.skyScene.add(this.skyShape).add(this.starShape).add(this.sunGlow);
+    this.sunPic = svg(sunSvg(), this.skyScene);
+    for (let i = 0; i < MOON_PHASES; i++) this.moonPics.push(svg(moonSvg(i), this.skyScene));
+    // Clouds live in their own scene so a tint effect can recolor them for dusk and night.
+    this.cloudScene = new TVG.Scene();
+    this.skyScene.add(this.cloudScene);
+    for (let v = 0; v < CLOUD_VARIANTS; v++) { const src = cloudSvg(v), pool: any[] = []; for (let i = 0; i < CLOUD_POOL; i++) pool.push(svg(src, this.cloudScene)); this.cloudPics.push(pool); }
     this.outline = new TVG.Shape();
     this.overlayScene.add(this.outline);
 
@@ -774,54 +784,55 @@ export class Renderer3D {
       this.starShape.fill(255, 255, 240, Math.floor(clamp((env.night - 0.25) * 1.6, 0, 1) * 230));
     }
 
-    // Sun and moon are screen-space squares, Minecraft style.
+    // Sun and moon are SVG pictures placed in screen space.
     const sd = env.sunDir;
     const sun = this.projectDir(sd[0], sd[1], sd[2]);
-    this.sunShape.reset(); this.sunGlow.reset();
-    if (sun && sd[1] > -0.12) {
-      const s = c.focal * 0.11;
-      const glow = new TVG.RadialGradient(sun[0], sun[1], s * 3.2);
+    this.sunGlow.reset();
+    const sunUp = !!sun && sd[1] > -0.12;
+    if (sunUp) {
+      const s = c.focal * 0.2;
+      const glow = new TVG.RadialGradient(sun![0], sun![1], s * 1.9);
       glow.addStop(0, [255, 236, 170, 150]).addStop(1, [255, 220, 150, 0]);
-      this.sunGlow.appendCircle(sun[0], sun[1], s * 3.2, s * 3.2).fill(glow);
-      this.sunShape.appendRect(sun[0] - s / 2, sun[1] - s / 2, s, s).fill(255, 244, 200, 255);
+      this.sunGlow.appendCircle(sun![0], sun![1], s * 1.9, s * 1.9).fill(glow);
+      this.sunPic.size(s, s).translate(sun![0] - s / 2, sun![1] - s / 2);
     }
+    this.sunPic.visible(sunUp);
     const moon = this.projectDir(-sd[0], -sd[1], -sd[2]);
-    this.moonShape.reset();
-    if (moon && -sd[1] > -0.12) {
-      const s = c.focal * 0.085;
-      this.moonShape.appendRect(moon[0] - s / 2, moon[1] - s / 2, s, s).fill(226, 232, 245, 255);
-    }
+    const moonUp = !!moon && -sd[1] > -0.12;
+    for (let i = 0; i < MOON_PHASES; i++) this.moonPics[i].visible(moonUp && i === env.moonPhase);
+    if (moonUp) { const s = c.focal * 0.17; this.moonPics[env.moonPhase].size(s, s).translate(moon![0] - s / 2, moon![1] - s / 2); }
 
-    // Cloud layer: a drifting grid of flat slabs high above the world, drawn behind terrain.
-    this.cloudShape.reset();
-    const CY = WH + 26, cell = 12, reach = 16;
-    if (c.y < CY - 1) {
-      const drift = env.time * 0.9;
+    // Cloud layer: SVG pictures scattered on a drifting grid high above the world, scaled by depth.
+    const CY = WH + 34, cell = 56, reach = 5, maxD = cell * (reach + 0.5);
+    const used = [0, 0, 0];
+    if (c.y < CY - 2) {
+      const drift = env.time * 1.1;
       const bx = Math.floor((c.x - drift) / cell), bz = Math.floor(c.z / cell);
-      let any = false;
       for (let gz = -reach; gz <= reach; gz++) for (let gx = -reach; gx <= reach; gx++) {
-        const ix = bx + gx, iz = bz + gz;
-        if (cloudHash(ix, iz) > 0.34) continue;
-        const x0 = ix * cell + drift, z0 = iz * cell;
-        this.tx[0] = x0; this.tz[0] = z0; this.tx[1] = x0 + cell; this.tz[1] = z0;
-        this.tx[2] = x0 + cell; this.tz[2] = z0 + cell; this.tx[3] = x0; this.tz[3] = z0 + cell;
-        this.ty[0] = this.ty[1] = this.ty[2] = this.ty[3] = CY;
-        this.toCamera(4);
-        let ok = true;
-        for (let k = 0; k < 4; k++) if (this.czs[k] < 1) { ok = false; break; }
-        if (!ok) continue;
-        for (let k = 0; k < 4; k++) {
-          const inv = c.focal / this.czs[k];
-          const sx = c.cx + this.cxs[k] * inv, sy = c.cy - this.cys[k] * inv;
-          if (k === 0) this.cloudShape.moveTo(sx, sy); else this.cloudShape.lineTo(sx, sy);
-        }
-        this.cloudShape.close();
-        any = true;
+        const ix = bx + gx, iz = bz + gz, hsh = cloudHash(ix, iz);
+        if (hsh > 0.42) continue;
+        const variant = Math.floor(hsh * 1000) % CLOUD_VARIANTS;
+        if (used[variant] >= CLOUD_POOL) continue;
+        const wx = (ix + 0.5 + (hsh * 7 % 1 - 0.5) * 0.6) * cell + drift, wz = (iz + 0.5 + (hsh * 13 % 1 - 0.5) * 0.6) * cell;
+        const hd = Math.hypot(wx - c.x, wz - c.z);
+        if (hd > maxD) continue;
+        const p = this.projectDir(wx - c.x, CY - c.y, wz - c.z);
+        if (!p || p[2] < 6) continue;
+        const w = (c.focal * (52 + hsh * 90)) / p[2], h = w * 0.4;
+        if (p[0] + w < 0 || p[0] - w > c.w || p[1] + h < 0 || p[1] - h > c.h) continue;
+        const pic = this.cloudPics[variant][used[variant]++];
+        pic.visible(true).size(w, h).translate(p[0] - w / 2, p[1] - h / 2).opacity(Math.floor(235 * clamp(1.5 - (hd / maxD) * 1.5, 0, 1)));
       }
-      if (any) {
-        const l = 0.35 + 0.65 * (1 - env.night);
-        this.cloudShape.fill((250 * l) | 0, (250 * l) | 0, (255 * l) | 0, 205);
-      }
+    }
+    for (let v = 0; v < CLOUD_VARIANTS; v++) for (let i = used[v]; i < CLOUD_POOL; i++) this.cloudPics[v][i].visible(false);
+    // Recolor the clouds with a tint effect: warm at dusk, dark blue at night. Only when the (quantized) color changes.
+    const q = (x: number) => Math.round(x / 12) * 12;
+    const l = 1 - env.night * 0.72;
+    const wr = q((255 * 0.7 + env.fog[0] * 0.3) * l), wg = q((255 * 0.7 + env.fog[1] * 0.3) * l), wb = q((255 * 0.72 + env.fog[2] * 0.28) * Math.min(1, l + 0.1));
+    const key = wr + ',' + wg + ',' + wb;
+    if (key !== this.cloudKey) {
+      this.cloudKey = key;
+      try { this.cloudScene.resetEffects(); if (wr < 250 || wg < 250 || wb < 250) this.cloudScene.tint(wr * 0.45, wg * 0.5, wb * 0.62, wr, wg, wb, 100); } catch { /* effects unsupported */ }
     }
   }
 

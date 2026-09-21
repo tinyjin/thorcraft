@@ -3,6 +3,7 @@
 import { B, BLOCKS, ITEMS, itemName } from './blocks';
 import { Input } from './input';
 import { COOK_TIME, CREATIVE_ITEMS, Furnace, HOTBAR, Inventory, SlotKind, SlotRef, Stack, WindowState, makeStack } from './inventory';
+import { ARROW_FRAMES, FLAME_FRAMES, HEART_SEG, arrowLottie, flameLottie, heartLottie } from './lottie';
 import { Player } from './player';
 import { texture } from './textures';
 import { UILayer } from './ui';
@@ -14,8 +15,11 @@ const PANEL = [198, 198, 198, 250] as const, PANEL_TEXT = [58, 58, 62, 255] as c
 
 export interface HudInfo {
   fps: number; debug: boolean; debugLines: string[]; gems: number; toast: string; toastAlpha: number;
-  nameAlpha: number; timeOfDay: number; inLava: boolean;
+  nameAlpha: number; timeOfDay: number; inLava: boolean; breakProgress: number; fxOn: boolean;
 }
+
+type HeartAnim = keyof typeof HEART_SEG;
+interface HeartSlot { full: any; half: any; level: number; anim: HeartAnim; variant: number; t: number }
 
 export interface Settings { renderDist: number; fov: number; sens: number; vol: number; auto: boolean }
 export type WindowKind = 'inventory' | 'crafting' | 'furnace';
@@ -26,6 +30,13 @@ const mapColor = (id: number) => {
   if (!c) mapColorCache.set(id, (c = texture(BLOCKS[id].faces[2]).avg));
   return c;
 };
+
+/** ThorVG reports an error when asked for the frame it already shows, so only send real changes. */
+function setFrame(anim: any, frame: number) {
+  if (Math.abs((anim.__f ?? -1) - frame) < 0.01) return;
+  anim.__f = frame;
+  try { anim.frame(frame); } catch { /* same frame after rounding */ }
+}
 
 export class Hud {
   readonly scene: any;
@@ -40,6 +51,29 @@ export class Hud {
   hot = false;
   seedText = '';
   private seedFocus = false;
+  // Lottie driven widgets
+  private lottieHud: any; private lottieMenu: any;
+  private hearts: HeartSlot[] = [];
+  private heartsDrawn = false; private furnaceDrawn = false; private titleDrawn = false;
+  private flame: any; private arrow: any; private flameClip: any;
+  private titleText: any = null;
+  private mapClip: any;
+  private lastTime = 0;
+  private tipWidths = new Map<string, number>();
+  private measureCtx: CanvasRenderingContext2D | null = null;
+
+  /** Text width in canvas pixels, measured with the same font file through a 2D context. ThorVG sizes are points (4/3 px). */
+  private textWidth(str: string, size: number): number {
+    const key = size + '|' + str;
+    let w = this.tipWidths.get(key);
+    if (w === undefined) {
+      this.measureCtx ??= document.createElement('canvas').getContext('2d');
+      if (!this.measureCtx || !document.fonts.check(`${size}px thorcraft-ui`)) return str.length * size * 0.62;
+      this.measureCtx.font = `${(size * 4) / 3}px thorcraft-ui`;
+      this.tipWidths.set(key, (w = this.measureCtx.measureText(str).width));
+    }
+    return w;
+  }
 
   constructor(private TVG: any, private input: Input, font: string) {
     this.scene = new TVG.Scene();
@@ -47,16 +81,73 @@ export class Hud {
     this.hud = new UILayer(TVG, font);
     this.menu = new UILayer(TVG, font);
     this.top = new UILayer(TVG, font);
-    this.scene.add(this.hud.scene).add(this.mapScene).add(this.menu.scene).add(this.top.scene);
+    this.lottieHud = new TVG.Scene();
+    this.lottieMenu = new TVG.Scene();
+    this.scene.add(this.hud.scene).add(this.lottieHud).add(this.mapScene).add(this.menu.scene).add(this.lottieMenu).add(this.top.scene);
+
+    const load = (json: string, parent: any) => {
+      const a = new TVG.LottieAnimation();
+      a.load(json);
+      a.picture.visible(false);
+      parent.add(a.picture);
+      return a;
+    };
+    const fullJson = heartLottie(false), halfJson = heartLottie(true);
+    for (let i = 0; i < 10; i++) this.hearts.push({ full: load(fullJson, this.lottieHud), half: load(halfJson, this.lottieHud), level: 2, anim: 'idle', variant: 2, t: 0 });
+    this.flame = load(flameLottie(), this.lottieMenu);
+    this.arrow = load(arrowLottie(), this.lottieMenu);
+    this.flameClip = new TVG.Shape();
+    this.flame.picture.clip(this.flameClip);
+    // The minimap is clipped to a disc.
+    this.mapClip = new TVG.Shape();
+    this.mapScene.clip(this.mapClip);
   }
 
   begin(w: number, h: number) {
     this.w = w; this.h = h; this.hot = false;
     this.hud.begin(); this.menu.begin(); this.top.begin();
     if (!this.input.buttons[0]) this.dragging = '';
+    this.heartsDrawn = this.furnaceDrawn = this.titleDrawn = false;
   }
 
-  end() { this.hud.end(); this.menu.end(); this.top.end(); }
+  end() {
+    this.hud.end(); this.menu.end(); this.top.end();
+    if (!this.heartsDrawn) for (const h of this.hearts) { h.full.picture.visible(false); h.half.picture.visible(false); }
+    if (!this.furnaceDrawn) { this.flame.picture.visible(false); this.arrow.picture.visible(false); }
+    if (!this.titleDrawn && this.titleText) this.titleText.visible(false);
+  }
+
+  /** Lottie hearts: each slot plays the marker range that matches what just happened to it. */
+  private drawHearts(player: Player, x0: number, hy: number, px: number, time: number) {
+    const dt = Math.min(0.1, Math.max(0, time - this.lastTime));
+    this.lastTime = time;
+    this.heartsDrawn = true;
+    const hpInt = Math.ceil(player.health), low = player.health <= 6 && !player.dead;
+    const size = (7 * px * 80) / 56;
+    for (let i = 0; i < 10; i++) {
+      const h = this.hearts[i], hp = hpInt - i * 2;
+      const target = hp >= 2 ? 2 : hp === 1 ? 1 : 0;
+      if (target < h.level) { h.anim = 'break'; h.variant = h.level; h.t = 0; h.level = target; }
+      else if (target > h.level) { h.anim = 'gain'; h.variant = target; h.t = 0; h.level = target; }
+      h.t += dt;
+      const seg = HEART_SEG[h.anim];
+      if (h.t * 30 >= seg[1]) {
+        // Finished: fall back to idle, or keep beating while health is critical.
+        h.variant = h.level;
+        if (low && h.level > 0) { h.anim = 'beat'; h.t = h.anim === 'beat' ? 0 : 0; }
+        else { h.anim = 'idle'; h.t = 0; }
+      } else if (h.anim === 'idle' && low && h.level > 0) { h.anim = 'beat'; h.t = -i * 0.05; }
+      const s2 = HEART_SEG[h.anim];
+      const frame = s2[0] + Math.min(s2[1] - 1, Math.max(0, h.t * 30));
+      const show = h.variant === 2 ? h.full : h.variant === 1 ? h.half : null;
+      const hide = show === h.full ? h.half : h.full;
+      hide.picture.visible(false);
+      if (!show) { h.full.picture.visible(false); continue; }
+      const hx = x0 + 2 + i * (px * 8);
+      setFrame(show, frame);
+      show.picture.visible(true).size(size, size).translate(hx - (12 / 80) * size, hy - (14 / 80) * size);
+    }
+  }
 
   // ------------------------------------------------------------------ widgets
 
@@ -118,8 +209,9 @@ export class Hud {
   drawGame(player: Player, inv: Inventory, info: HudInfo, time: number) {
     const ui = this.hud, w = this.w, h = this.h;
 
-    if (info.inLava) ui.rect(0, 0, w, h, [230, 80, 10, 140]);
-    else if (player.headInWater) ui.rect(0, 0, w, h, [20, 60, 170, 95]);
+    // Underwater, lava and night grading are scene effects (see fx.ts); `fxOn` false falls back to overlays.
+    if (!info.fxOn && info.inLava) ui.rect(0, 0, w, h, [230, 80, 10, 140]);
+    else if (!info.fxOn && player.headInWater) ui.rect(0, 0, w, h, [20, 60, 170, 95]);
     if (player.hurtTimer > 0) {
       const a = Math.floor(player.hurtTimer * 420), e = Math.min(w, h) * 0.16;
       ui.rect(0, 0, w, e, [200, 0, 0, a]); ui.rect(0, h - e, w, e, [200, 0, 0, a]);
@@ -133,6 +225,12 @@ export class Hud {
     ui.rect(cx - 2, cy - 11, 4, 22, [0, 0, 0, 110]);
     ui.rect(cx - 10, cy - 1, 20, 2, [255, 255, 255, 235]);
     ui.rect(cx - 1, cy - 10, 2, 20, [255, 255, 255, 235]);
+
+    // Mining progress: a ring around the crosshair, drawn with a trimmed stroke.
+    if (info.breakProgress > 0) {
+      ui.shape().appendCircle(cx, cy, 17, 17).fill(0, 0, 0, 0).stroke({ width: 5, color: [0, 0, 0, 90] });
+      ui.shape().appendCircle(cx, cy, 17, 17).fill(0, 0, 0, 0).trimPath(0, Math.min(1, info.breakProgress)).stroke({ width: 3, color: [255, 255, 255, 240], cap: 'round' });
+    }
 
     // Hotbar
     const size = Math.min(50, (w - 40) / HOTBAR);
@@ -155,20 +253,13 @@ export class Hud {
     // Hearts and air
     if (!player.creative) {
       const px = 2.6, hy = y0 - 26;
-      const full = ui.shape(), empty = ui.shape();
-      const hpInt = Math.ceil(player.health);
+      const empty = ui.shape();
       for (let i = 0; i < 10; i++) {
-        const hp = hpInt - i * 2;
         const hx = x0 + 2 + i * (px * 8);
-        const shake = player.health <= 6 ? Math.sin(time * 18 + i) * 1.2 : 0;
-        for (let r = 0; r < HEART.length; r++) for (let c = 0; c < 7; c++) {
-          if (HEART[r][c] !== '1') continue;
-          const filled = hp >= 2 || (hp === 1 && c < 4);
-          (filled ? full : empty).appendRect(hx + c * px, hy + r * px + shake, px + 0.3, px + 0.3);
-        }
+        for (let r = 0; r < HEART.length; r++) for (let c = 0; c < 7; c++) if (HEART[r][c] === '1') empty.appendRect(hx + c * px, hy + r * px, px + 0.3, px + 0.3);
       }
       empty.fill(40, 16, 20, 210);
-      full.fill(232, 34, 42, 255);
+      this.drawHearts(player, x0, hy, px, time);
       if (player.air < 10) {
         const bub = ui.shape();
         const n = Math.ceil(player.air);
@@ -234,15 +325,17 @@ export class Hud {
       }
     }
     this.mapScene.translate(ox, oy);
+    this.mapClip.reset().appendCircle(ox + size / 2, oy + size / 2, size / 2, size / 2);
     const ui = this.hud;
-    ui.rect(ox - 4, oy - 4, size + 8, size + 8, [0, 0, 0, 150]);
+    ui.shape().appendCircle(ox + size / 2, oy + size / 2, size / 2 + 4, size / 2 + 4).fill(0, 0, 0, 150);
+    this.top.shape().appendCircle(ox + size / 2, oy + size / 2, size / 2 + 1, size / 2 + 1).fill(0, 0, 0, 0).stroke({ width: 3, color: [235, 235, 235, 230] });
     // Player arrow (drawn in the top layer so it sits above the map scene)
     const t = this.top;
     const cx = ox + size / 2, cy = oy + size / 2, a = player.yaw;
     const fx = -Math.sin(a), fz = -Math.cos(a);
     t.poly([cx + fx * 8, cy + fz * 8, cx - fx * 5 - fz * 5, cy - fz * 5 + fx * 5, cx - fx * 2, cy - fz * 2, cx - fx * 5 + fz * 5, cy - fz * 5 - fx * 5], [255, 255, 255, 255])
       .stroke({ width: 1.5, color: [0, 0, 0, 255], join: 'round' });
-    t.text('N', cx, oy + 2, 11, [255, 255, 255, 220], 0.5, 0, 2);
+    t.text('N', cx, oy + 4, 11, [255, 255, 255, 235], 0.5, 0, 2);
   }
 
   setMinimapVisible(v: boolean) { this.mapScene.visible(v); }
@@ -258,7 +351,20 @@ export class Hud {
     const bs = Math.min(30, w / 28);
     const cols: number[] = [B.GRASS, B.LOG, B.STONE, B.BRICK, B.DIAMOND_ORE, B.PLANKS, B.CRAFTING_TABLE, B.GLOWSTONE, B.TNT];
     for (let i = 0; i < cols.length; i++) ui.icon(cols[i], w / 2 + (i - 4) * bs * 2.1, ty - 78 + Math.sin(time * 2 + i * 0.7) * 6, bs);
-    ui.text('THORCRAFT', w / 2, ty, Math.min(84, w / 8), [235, 235, 235, 255], 0.5, 0.5, 8);
+    const fs = Math.min(84, w / 8);
+    ui.text('THORCRAFT', w / 2 + 5, ty + 5, fs, [0, 0, 0, 190], 0.5, 0.5);
+    if (!this.titleText) {
+      this.titleText = new this.TVG.Text();
+      this.titleText.font('ui').text('THORCRAFT');
+      this.lottieMenu.add(this.titleText);
+    }
+    // A gradient filled logo with a slowly travelling sheen.
+    const sheen = (time * 0.25) % 1.6 - 0.3;
+    const grad = new this.TVG.LinearGradient(0, 0, fs * 6, fs * 0.6);
+    const stop = (o: number, c: number[]) => grad.addStop(Math.min(1, Math.max(0, o)), c);
+    stop(0, [255, 214, 92, 255]); stop(sheen - 0.12, [255, 170, 40, 255]); stop(sheen, [255, 255, 235, 255]); stop(sheen + 0.12, [255, 170, 40, 255]); stop(1, [255, 120, 30, 255]);
+    this.titleText.fontSize(fs).fill(grad).align(0.5, 0.5).translate(w / 2, ty).visible(true);
+    this.titleDrawn = true;
     ui.text('an infinite voxel world drawn by ThorVG WebCanvas!', w / 2, ty + 56, 17, [255, 255, 85, 255], 0.5, 0.5, 2);
 
     const bw = 380, bh = 44, bx = w / 2 - bw / 2, gap = 10;
@@ -371,14 +477,18 @@ export class Hud {
       const fx = px + panelW / 2 - size * 2.2, fy = gy + 4;
       cell(furnace.slots, 0, 'normal', fx, fy);
       cell(furnace.slots, 1, 'fuel', fx, fy + size * 2.1);
-      // Flame gauge
+      // Flame: a looping Lottie, clipped from the top as the fuel burns down.
       const bf = furnace.burnMax ? Math.max(0, furnace.burn / furnace.burnMax) : 0;
-      ui.rect(fx + size * 0.3, fy + size * 1.15, size * 0.4, size * 0.8, [110, 110, 110, 255]);
-      if (bf > 0) ui.rect(fx + size * 0.3, fy + size * 1.15 + size * 0.8 * (1 - bf), size * 0.4, size * 0.8 * bf, [255, 140, 20, 255]);
-      // Progress arrow
-      const ax = fx + size * 1.5, ay = fy + size * 1.2, aw = size * 1.4;
-      ui.rect(ax, ay, aw, size * 0.28, [110, 110, 110, 255]);
-      ui.rect(ax, ay, aw * Math.min(1, furnace.cook / COOK_TIME), size * 0.28, [255, 255, 255, 255]);
+      const fs = size * 0.95, flx = fx + (size - fs) / 2, fly = fy + size * 1.07;
+      ui.rect(flx + fs * 0.12, fly + fs * 0.05, fs * 0.76, fs * 0.9, [150, 150, 150, 255], 6);
+      this.furnaceDrawn = true;
+      setFrame(this.flame, (this.lastTime * 30) % FLAME_FRAMES);
+      this.flame.picture.visible(bf > 0).size(fs, fs).translate(flx, fly);
+      this.flameClip.reset().appendRect(flx, fly + fs * (1 - bf) * 0.9, fs, fs);
+      // Progress arrow: the Lottie's trim path is scrubbed by the smelting progress.
+      const ah = size * 0.9, aw = ah * 1.5, ax = fx + size * 1.45, ay = fy + size * 1.05;
+      setFrame(this.arrow, Math.min(ARROW_FRAMES - 1, (furnace.cook / COOK_TIME) * (ARROW_FRAMES - 1)));
+      this.arrow.picture.visible(true).size(aw, ah).translate(ax, ay);
       cell(furnace.slots, 2, 'output', fx + size * 3.3, fy + size * 0.9, size * 1.2);
     } else {
       ui.text(kind === 'crafting' ? 'Crafting Table' : 'Crafting', gx, py + 17, 14, PANEL_TEXT, 0, 0.5);
@@ -400,9 +510,12 @@ export class Hud {
     const t = this.top;
     if (ws.cursor) this.stack(t, ws.cursor, inp.mouseX - size / 2, inp.mouseY - size / 2, size);
     else if (tip) {
-      t.rect(inp.mouseX + 12, inp.mouseY - 32, tip.length * 8.2 + 20, 26, [42, 10, 90, 255]);
-      t.rect(inp.mouseX + 14, inp.mouseY - 30, tip.length * 8.2 + 16, 22, [16, 0, 32, 245]);
+      // Size the box from real font metrics. (ThorVG's bounds() lags a frame behind on pooled text paints, which
+      // made the box keep the previous item's width.)
       t.text(tip, inp.mouseX + 22, inp.mouseY - 19, 13, WHITE, 0, 0.5);
+      const tw = this.textWidth(tip, 13);
+      t.rect(inp.mouseX + 12, inp.mouseY - 32, tw + 20, 26, [42, 10, 90, 255]);
+      t.rect(inp.mouseX + 14, inp.mouseY - 30, tw + 16, 22, [16, 0, 32, 245]);
     }
     return clicked;
   }
