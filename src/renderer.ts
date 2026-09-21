@@ -6,18 +6,28 @@
 // are therefore bucketed by Manhattan distance and drawn far to near. Faces inside one bucket
 // never hide each other, which leaves us free to sort them by color and merge every
 // (bucket, color, fog) run into a single multi-subpath Shape.
+//
+// Textures are vector too: every face is a flat base quad plus the merged texel rectangles of
+// a distance dependent level of detail (see textures.ts), followed by translucent ambient
+// occlusion strips along edges that touch a protruding block.
 
-import { DIR_O, DIR_U, DIR_V, LAMP_MUL, SKY_MUL, decals, palette } from './blocks';
-import { CS, FACE_STRIDE, WH, World } from './world';
-import { clamp } from './math';
+import { B, BLOCKS, DIR_O, DIR_SHADE, DIR_U, DIR_V, LAMP_MUL, SKY_MUL, palette } from './blocks';
+import { CS, FACE_STRIDE, PLANT_STRIDE, WH, World } from './world';
+import { clamp, mulberry32 } from './math';
+import { Tex, TexLod, texture } from './textures';
 
-const MAX_POLYS = 65536;
+const MAX_POLYS = 131072;
 const MAX_BUCKET = 255;
 const NEAR = 0.08;
 const FOG_LEVELS = 32;
-const DECAL_DIST = 9;
+/** Distance (in blocks) up to which each texture level of detail is used; beyond the last one faces are flat. */
+const LOD_DIST = [5, 11, 20, 31];
+const AO_DIST = 38;
+const PLANT_DIST = 36;
+const HAND_ORDER = 1023;
+const AO_W = 0.2;
 
-export const enum Layer { TERRAIN = 0, DECAL = 1, ENTITY = 2 }
+export const enum Layer { TERRAIN = 0, DECAL = 1, AO = 2, ENTITY = 3 }
 
 export class Camera {
   x = 0; y = 0; z = 0; yaw = 0; pitch = 0; fov = 75;
@@ -50,38 +60,70 @@ export interface Environment {
 
 export interface RenderStats { polys: number; shapes: number; chunks: number; collectMs: number; emitMs: number }
 
+/** What the first person hand holds: a block id, a flat item sprite, or nothing (bare arm). */
+export interface HeldView { block: number; sprite: Tex | null; swing: number; bobX: number; bobY: number; drop: number; sky: number; lamp: number }
+
 type TVGNS = any;
+type RGB = readonly [number, number, number];
+
+/** Textures per block face, FACE_TEX[id * 6 + dir]. */
+const FACE_TEX: Tex[] = [];
+for (let id = 0; id < B.COUNT; id++) for (let d = 0; d < 6; d++) FACE_TEX[id * 6 + d] = texture(BLOCKS[id].faces[d]);
+export const blockTextures = (id: number): Tex[] => FACE_TEX.slice(id * 6, id * 6 + 6);
+
+/** Crack stages: cumulative texel lists on a 16x16 grid. */
+const CRACKS: number[][] = [];
+for (let s = 0; s < 10; s++) {
+  const rng = mulberry32(1234), cells = new Set<number>();
+  for (let line = 0; line < 2 + s; line++) {
+    let x = 8, y = 8;
+    const ang = rng() * Math.PI * 2, len = 3 + Math.floor(rng() * (3 + s));
+    for (let i = 0; i < len; i++) {
+      cells.add(clamp(Math.round(y), 0, 15) * 16 + clamp(Math.round(x), 0, 15));
+      x += Math.cos(ang) + (rng() - 0.5) * 1.2; y += Math.sin(ang) + (rng() - 0.5) * 1.2;
+    }
+  }
+  CRACKS.push([...cells]);
+}
 
 export class Renderer3D {
   readonly scene: any;
   readonly skyScene: any;
   readonly overlayScene: any;
   renderDistance = 56;
+  /** Scales the texture LOD distances; lowered automatically when frames get slow. */
+  detail = 1;
   stats: RenderStats = { polys: 0, shapes: 0, chunks: 0, collectMs: 0, emitMs: 0 };
 
   private TVG: TVGNS;
   private pool: any[] = [];
   private usedLast = 0;
   private skyShape: any; private sunShape: any; private moonShape: any; private starShape: any; private cloudShape: any; private sunGlow: any;
-  private outline: any; private crack: any;
+  private outline: any;
 
   // Per-frame polygon store
   private keys = new Float64Array(MAX_POLYS);
   private pStart = new Uint32Array(MAX_POLYS);
   private pN = new Uint8Array(MAX_POLYS);
   private pColor = new Uint16Array(MAX_POLYS);
-  private verts = new Float32Array(MAX_POLYS * 12);
+  private verts = new Float32Array(MAX_POLYS * 9);
   private count = 0;
   private vtop = 0;
 
   // Scratch
   private cxs = new Float64Array(8); private cys = new Float64Array(8); private czs = new Float64Array(8);
   private tx = new Float64Array(8); private ty = new Float64Array(8); private tz = new Float64Array(8);
+  // Camera-space basis of the quad currently being textured: origin, u edge, v edge.
+  private q = new Float64Array(9);
   private ptPool: number[][] = [];
-  private cmdCache: number[][] = [];
+  private cmdCache: Uint8Array[] = [];
   private stars: number[] = [];
   private cam!: Camera;
   private camCell = [0, 0, 0];
+  private time = 0;
+  private aoId = palette.fixedId(0, 0, 0, 50);
+  private aoId2 = palette.fixedId(0, 0, 0, 34);
+  private crackId = palette.fixedId(12, 12, 14, 200);
 
   constructor(TVG: TVGNS) {
     this.TVG = TVG;
@@ -96,8 +138,7 @@ export class Renderer3D {
     this.cloudShape = new TVG.Shape();
     this.skyScene.add(this.skyShape).add(this.starShape).add(this.sunGlow).add(this.sunShape).add(this.moonShape).add(this.cloudShape);
     this.outline = new TVG.Shape();
-    this.crack = new TVG.Shape();
-    this.overlayScene.add(this.crack).add(this.outline);
+    this.overlayScene.add(this.outline);
 
     // Fixed star field on the unit sphere.
     let s = 1234567;
@@ -110,8 +151,9 @@ export class Renderer3D {
 
   // ------------------------------------------------------------------ frame lifecycle
 
-  begin(cam: Camera) {
+  begin(cam: Camera, time: number) {
     this.cam = cam;
+    this.time = time;
     palette.resetDynamic();
     this.count = 0;
     this.vtop = 0;
@@ -136,7 +178,7 @@ export class Renderer3D {
    * that many pixels to hide anti-aliasing seams between adjacent faces.
    */
   private pushPoly(n: number, order: number, sub: number, fog: number, color: number, grow: number): boolean {
-    if (this.count >= MAX_POLYS) return false;
+    if (this.count >= MAX_POLYS || this.vtop + 24 > this.verts.length) return false;
     const c = this.cam, xs = this.cxs, ys = this.cys, zs = this.czs, v = this.verts;
     let behind = 0;
     for (let i = 0; i < n; i++) if (zs[i] < NEAR) behind++;
@@ -198,14 +240,49 @@ export class Renderer3D {
     this.pN[idx] = m;
     this.pColor[idx] = color;
     this.vtop = o;
-    this.keys[idx] = ((order * 4096 + sub) * FOG_LEVELS + fog) * MAX_POLYS + idx;
+    this.keys[idx] = ((order * 65536 + sub) * FOG_LEVELS + fog) * MAX_POLYS + idx;
     return true;
   }
 
   private fogLevel(dist: number): number {
     const R = this.renderDistance;
-    const t = clamp((dist - R * 0.45) / (R * 0.55), 0, 1);
+    const t = clamp((dist - R * 0.58) / (R * 0.42), 0, 1);
     return Math.min(FOG_LEVELS - 1, Math.floor(t * t * FOG_LEVELS));
+  }
+
+  /** Remembers the camera-space quad in scratch slots 0 (origin), 1 (origin + u) and 3 (origin + v). */
+  private latchQuad() {
+    const q = this.q, xs = this.cxs, ys = this.cys, zs = this.czs;
+    q[0] = xs[0]; q[1] = ys[0]; q[2] = zs[0];
+    q[3] = xs[1] - xs[0]; q[4] = ys[1] - ys[0]; q[5] = zs[1] - zs[0];
+    q[6] = xs[3] - xs[0]; q[7] = ys[3] - ys[0]; q[8] = zs[3] - zs[0];
+  }
+
+  /** Pushes the sub-rectangle (u0, v0)-(u1, v1) of the latched quad. */
+  private pushCell(u0: number, v0: number, u1: number, v1: number, order: number, sub: number, fog: number, color: number, grow: number) {
+    const q = this.q, xs = this.cxs, ys = this.cys, zs = this.czs;
+    xs[0] = q[0] + q[3] * u0 + q[6] * v0; ys[0] = q[1] + q[4] * u0 + q[7] * v0; zs[0] = q[2] + q[5] * u0 + q[8] * v0;
+    xs[1] = q[0] + q[3] * u1 + q[6] * v0; ys[1] = q[1] + q[4] * u1 + q[7] * v0; zs[1] = q[2] + q[5] * u1 + q[8] * v0;
+    xs[2] = q[0] + q[3] * u1 + q[6] * v1; ys[2] = q[1] + q[4] * u1 + q[7] * v1; zs[2] = q[2] + q[5] * u1 + q[8] * v1;
+    xs[3] = q[0] + q[3] * u0 + q[6] * v1; ys[3] = q[1] + q[4] * u0 + q[7] * v1; zs[3] = q[2] + q[5] * u0 + q[8] * v1;
+    this.pushPoly(4, order, sub, fog, color, grow);
+  }
+
+  private lodFor(tex: Tex, dist: number): TexLod | null {
+    const d = dist / this.detail, skip = 4 - tex.lods.length; // sprites have no 2x2 level
+    for (let i = 0; i < tex.lods.length; i++) if (d < LOD_DIST[i + (tex.sprite ? skip : 0)]) return tex.lods[i];
+    return null;
+  }
+
+  /** Permanent palette id of a texture tone under the given face shade and light levels. */
+  private toneId(ids: Uint16Array, rgb: RGB, alpha: number, dir: number, sky: number, lamp: number, emissive: boolean): number {
+    const k = (dir * 3 + sky) * 4 + lamp;
+    let id = ids[k];
+    if (id === 0) {
+      const m = emissive ? 1 : DIR_SHADE[dir];
+      id = ids[k] = palette.fixedId(rgb[0] * m, rgb[1] * m, rgb[2] * m, alpha, sky, emissive ? 3 : lamp);
+    }
+    return id;
   }
 
   // ------------------------------------------------------------------ terrain
@@ -221,12 +298,13 @@ export class Renderer3D {
     // Conservative cone test for chunks: half angle covers the screen diagonal.
     const diag = Math.atan(Math.hypot(cam.w, cam.h) / 2 / cam.focal);
     const tx = this.tx, ty = this.ty, tz = this.tz;
+    const time = this.time;
     let chunks = 0;
 
     for (let dcz = -cr; dcz <= cr; dcz++) for (let dcx = -cr; dcx <= cr; dcx++) {
       if (!world.hasChunk(ccx + dcx, ccz + dcz)) continue;
       const ch = world.chunkAt(ccx + dcx, ccz + dcz);
-      if (!ch.meshed || ch.faceCount === 0) continue;
+      if (!ch.meshed || (ch.faceCount === 0 && ch.plantCount === 0)) continue;
 
       // Chunk bounding sphere vs. view cone and render distance.
       const mx = ch.cx * CS + 8, mz = ch.cz * CS + 8, my = (ch.minY + ch.maxY) / 2;
@@ -261,12 +339,12 @@ export class Renderer3D {
         // Cheap behind-camera rejection.
         if (ddx * f[0] + ddy * f[1] + ddz * f[2] < -1.8) continue;
 
-        const block = meta >> 8;
+        const block = meta >> 8, sky = (meta >> 3) & 3, lamp = (meta >> 5) & 3;
+        const def = BLOCKS[block];
         const o = DIR_O[dir], u = DIR_U[dir], w = DIR_V[dir];
         const ox = bx + o[0], oz = bz + o[2];
         let oy = by + o[1];
-        const liquidTop = block === 5 /* WATER */ && dir === 2;
-        if (liquidTop) oy -= 0.12;
+        if (def.liquid && dir === 2) oy -= 0.12;
         tx[0] = ox; ty[0] = oy; tz[0] = oz;
         tx[1] = ox + u[0]; ty[1] = oy + u[1]; tz[1] = oz + u[2];
         tx[2] = ox + u[0] + w[0]; ty[2] = oy + u[1] + w[1]; tz[2] = oz + u[2] + w[2];
@@ -277,22 +355,75 @@ export class Renderer3D {
         const order = (MAX_BUCKET - bucket) * 4;
         const dist2 = Math.sqrt(d2);
         const fog = this.fogLevel(dist2);
-        const color = faces[i + 4];
-        const translucent = palette.a[color] < 255;
-        if (!this.pushPoly(4, order + Layer.TERRAIN, color & 4095, fog, color, translucent ? 0 : 0.6)) continue;
+        const tex = FACE_TEX[block * 6 + dir];
+        const alpha = def.alpha, emissive = def.light > 0;
+        const translucent = alpha < 255;
+        const lod = translucent && block !== B.GLASS ? null : this.lodFor(tex, dist2);
 
-        // Vector "textures" for nearby faces.
-        if (dist2 < DECAL_DIST) {
-          const list = decals[block][dir];
-          if (list.length) {
-            const li = ((meta >> 3) & 3) * 4 + ((meta >> 5) & 3);
-            for (let k = 0; k < list.length; k++) {
-              const dc = list[k];
-              this.faceRect(ox, oy, oz, u, w, dc.u0, dc.v0, dc.u1, dc.v1);
-              this.toCamera(4);
-              this.pushPoly(4, order + Layer.DECAL, dc.ids[li] & 4095, fog, dc.ids[li], 0);
-            }
+        let color: number;
+        if (def.liquid) {
+          // Shimmer: slide between three tones of the liquid with a travelling wave.
+          const wv = Math.sin(time * (block === B.LAVA ? 0.6 : 1.4) + bx * 0.9 + bz * 0.6) + Math.sin(time * 0.9 - bz * 0.8 + bx * 0.3);
+          const k = wv > 0.7 ? 1.1 : wv < -0.7 ? 0.9 : 1;
+          const a = tex.avg;
+          color = palette.id(a[0] * k * DIR_SHADE[dir], a[1] * k * DIR_SHADE[dir], a[2] * k * DIR_SHADE[dir], alpha, sky, emissive ? 3 : lamp);
+        } else if (lod) color = this.toneId(lod.ids[lod.base], lod.tones[lod.base], alpha, dir, sky, lamp, emissive);
+        else color = this.toneId(tex.avgIds, tex.avg, alpha, dir, sky, lamp, emissive);
+
+        const hasDetail = lod !== null && lod.rects.length > 0;
+        const ao = faces[i + 4];
+        const wantAO = ao !== 0 && dist2 < AO_DIST;
+        if (hasDetail || wantAO) this.latchQuad();
+        if (!this.pushPoly(4, order + Layer.TERRAIN, color, fog, color, translucent ? 0 : 0.6)) continue;
+
+        if (hasDetail) {
+          const rc = lod!.rects, inv = 1 / lod!.n, side = dir !== 2 && dir !== 3, cellAlpha = translucent ? 230 : 255;
+          for (let k = 0; k < rc.length; k += 5) {
+            const tone = rc[k + 4];
+            const id = this.toneId(lod!.ids[tone], lod!.tones[tone], cellAlpha, dir, sky, lamp, emissive);
+            // Side faces run their u axis right to left as seen from outside, so mirror the texels.
+            const u0 = side ? 1 - rc[k + 2] * inv : rc[k] * inv, u1 = side ? 1 - rc[k] * inv : rc[k + 2] * inv;
+            this.pushCell(u0, rc[k + 1] * inv, u1, rc[k + 3] * inv, order + Layer.DECAL, id, fog, id, 0.3);
           }
+        }
+        if (wantAO) {
+          const a1 = this.aoId, a2 = this.aoId2, oa = order + Layer.AO;
+          if (ao & 1) { this.pushCell(0, 0, AO_W, 1, oa, a1, fog, a1, 0); this.pushCell(0, 0, AO_W * 0.45, 1, oa, a2, fog, a2, 0); }
+          if (ao & 2) { this.pushCell(1 - AO_W, 0, 1, 1, oa, a1, fog, a1, 0); this.pushCell(1 - AO_W * 0.45, 0, 1, 1, oa, a2, fog, a2, 0); }
+          if (ao & 4) { this.pushCell(0, 0, 1, AO_W, oa, a1, fog, a1, 0); this.pushCell(0, 0, 1, AO_W * 0.45, oa, a2, fog, a2, 0); }
+          if (ao & 8) { this.pushCell(0, 1 - AO_W, 1, 1, oa, a1, fog, a1, 0); this.pushCell(0, 1 - AO_W * 0.45, 1, 1, oa, a2, fog, a2, 0); }
+        }
+      }
+
+      // Plants and torches
+      const pl = ch.plants;
+      for (let i = 0, n = ch.plantCount * PLANT_STRIDE; i < n; i += PLANT_STRIDE) {
+        const bx = pl[i], by = pl[i + 1], bz = pl[i + 2], meta = pl[i + 3];
+        const ddx = bx + 0.5 - cam.x, ddy = by + 0.5 - cam.y, ddz = bz + 0.5 - cam.z;
+        const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+        if (d2 > PLANT_DIST * PLANT_DIST || d2 > R2 || ddx * f[0] + ddy * f[1] + ddz * f[2] < -1) continue;
+        const id = meta & 255, sky = (meta >> 8) & 3, lamp = (meta >> 10) & 3;
+        if (id === B.TORCH) {
+          this.drawBox(bx + 0.5, by, bz + 0.5, 0, ZERO, [-0.0625, 0, -0.0625], [0.125, 0.56, 0.125], 0, [132, 96, 52], sky, 3);
+          this.drawBox(bx + 0.5, by + 0.56, bz + 0.5, 0, ZERO, [-0.07, 0, -0.07], [0.14, 0.12, 0.14], 0, [255, 214, 90], 0, 3);
+          continue;
+        }
+        const dist2 = Math.sqrt(d2);
+        const tex = FACE_TEX[id * 6];
+        const lod = this.lodFor(tex, dist2 * 0.8) ?? tex.lods[tex.lods.length - 1];
+        const bucket = Math.min(MAX_BUCKET, Math.abs(bx - ex) + Math.abs(by - ey) + Math.abs(bz - ez));
+        const order = (MAX_BUCKET - bucket) * 4 + Layer.ENTITY;
+        const sub = 65535 - Math.min(65535, Math.floor((dist2 / (R + 2)) * 65535));
+        const fog = this.fogLevel(dist2);
+        for (let p = 0; p < 2; p++) {
+          const a = 0.15, b = 0.85;
+          tx[0] = bx + a; tz[0] = bz + (p ? b : a); tx[1] = bx + b; tz[1] = bz + (p ? a : b);
+          tx[3] = tx[0]; tz[3] = tz[0];
+          ty[0] = ty[1] = by + 1; ty[3] = by;
+          tx[2] = tx[1]; ty[2] = by; tz[2] = tz[1];
+          this.toCamera(4);
+          this.latchQuad();
+          this.pushSprite(lod, order, sub, fog, sky, lamp, 1);
         }
       }
     }
@@ -300,12 +431,37 @@ export class Renderer3D {
     this.stats.collectMs = performance.now() - t0;
   }
 
-  private faceRect(ox: number, oy: number, oz: number, u: readonly number[], w: readonly number[], u0: number, v0: number, u1: number, v1: number) {
-    const tx = this.tx, ty = this.ty, tz = this.tz;
-    tx[0] = ox + u[0] * u0 + w[0] * v0; ty[0] = oy + u[1] * u0 + w[1] * v0; tz[0] = oz + u[2] * u0 + w[2] * v0;
-    tx[1] = ox + u[0] * u1 + w[0] * v0; ty[1] = oy + u[1] * u1 + w[1] * v0; tz[1] = oz + u[2] * u1 + w[2] * v0;
-    tx[2] = ox + u[0] * u1 + w[0] * v1; ty[2] = oy + u[1] * u1 + w[1] * v1; tz[2] = oz + u[2] * u1 + w[2] * v1;
-    tx[3] = ox + u[0] * u0 + w[0] * v1; ty[3] = oy + u[1] * u0 + w[1] * v1; tz[3] = oz + u[2] * u0 + w[2] * v1;
+  /** Emits the texels of a sprite level onto the latched quad. */
+  private pushSprite(lod: TexLod, order: number, sub: number, fog: number, sky: number, lamp: number, shade: number) {
+    const rc = lod.rects, inv = 1 / lod.n;
+    for (let k = 0; k < rc.length; k += 5) {
+      const tone = rc[k + 4], c = lod.tones[tone];
+      const id = shade === 1 ? this.toneId(lod.ids[tone], c, 255, 2, sky, lamp, false) : palette.id(c[0] * shade, c[1] * shade, c[2] * shade, 255, sky, lamp);
+      this.pushCell(rc[k] * inv, rc[k + 1] * inv, rc[k + 2] * inv, rc[k + 3] * inv, order, sub, fog, id, 0.25);
+    }
+  }
+
+  /** Break progress overlay on the targeted block. */
+  drawCrack(bx: number, by: number, bz: number, progress: number) {
+    const stage = CRACKS[clamp(Math.floor(progress * 10), 0, 9)];
+    const cam = this.cam, [ex, ey, ez] = this.camCell;
+    const bucket = Math.min(MAX_BUCKET, Math.abs(bx - ex) + Math.abs(by - ey) + Math.abs(bz - ez));
+    const order = (MAX_BUCKET - bucket) * 4 + Layer.ENTITY;
+    const tx = this.tx, ty = this.ty, tz = this.tz, e = 0.003;
+    for (let dir = 0; dir < 6; dir++) {
+      const vis = dir === 0 ? cam.x > bx + 1 : dir === 1 ? cam.x < bx : dir === 2 ? cam.y > by + 1 : dir === 3 ? cam.y < by : dir === 4 ? cam.z > bz + 1 : cam.z < bz;
+      if (!vis) continue;
+      const o = DIR_O[dir], u = DIR_U[dir], w = DIR_V[dir];
+      const nx = dir === 0 ? e : dir === 1 ? -e : 0, ny = dir === 2 ? e : dir === 3 ? -e : 0, nz = dir === 4 ? e : dir === 5 ? -e : 0;
+      const ox = bx + o[0] + nx, oy = by + o[1] + ny, oz = bz + o[2] + nz;
+      tx[0] = ox; ty[0] = oy; tz[0] = oz;
+      tx[1] = ox + u[0]; ty[1] = oy + u[1]; tz[1] = oz + u[2];
+      tx[3] = ox + w[0]; ty[3] = oy + w[1]; tz[3] = oz + w[2];
+      tx[2] = tx[1] + w[0]; ty[2] = ty[1] + w[1]; tz[2] = tz[1] + w[2];
+      this.toCamera(4);
+      this.latchQuad();
+      for (const c of stage) { const x = c & 15, y = c >> 4; this.pushCell(x / 16, y / 16, (x + 1) / 16, (y + 1) / 16, order, 65535, 0, this.crackId, 0.2); }
+    }
   }
 
   // ------------------------------------------------------------------ free-form geometry (entities, particles)
@@ -315,19 +471,21 @@ export class Renderer3D {
    * around the X axis by `swing` about the part origin, offset by `pivot`, rotated by `yaw`
    * around Y and finally translated to (px, py, pz).
    * `faceDecals` are UV rectangles painted on the front (-Z) face: [u0, v0, u1, v1, r, g, b].
+   * `tex` textures the six faces like a block (indexed by block face direction); `rgb` then acts as a tint (255 = neutral).
    */
   drawBox(
     px: number, py: number, pz: number, yaw: number,
     pivot: readonly [number, number, number], o: readonly [number, number, number], s: readonly [number, number, number],
     swing: number, rgb: readonly [number, number, number], sky: number, lampLevel = 0,
-    faceDecals?: ReadonlyArray<readonly number[]>, alpha = 255, roll = 0,
+    faceDecals?: ReadonlyArray<readonly number[]>, alpha = 255, roll = 0, tex?: Tex[], lodScale = 1,
   ) {
     const cam = this.cam;
     const sy = Math.sin(yaw), cy = Math.cos(yaw), ss = Math.sin(swing), cs = Math.cos(swing), sr = Math.sin(roll), cr = Math.cos(roll);
     // 8 corners in world space
     const wx: number[] = boxWX, wy: number[] = boxWY, wz: number[] = boxWZ;
     for (let i = 0; i < 8; i++) {
-      let lx = o[0] + (i & 1 ? s[0] : 0), ly = o[1] + (i & 2 ? s[1] : 0), lz = o[2] + (i & 4 ? s[2] : 0);
+      let lx = o[0] + (i & 1 ? s[0] : 0), ly = o[1] + (i & 2 ? s[1] : 0);
+      const lz = o[2] + (i & 4 ? s[2] : 0);
       // roll around Z, then swing around X
       const rx = lx * cr - ly * sr, ry = lx * sr + ly * cr; lx = rx; ly = ry;
       const y2 = ly * cs - lz * ss, z2 = ly * ss + lz * cs;
@@ -361,25 +519,51 @@ export class Renderer3D {
       tx[3] = wx[d]; ty[3] = wy[d]; tz[3] = wz[d];
       this.toCamera(4);
       const fd = Math.hypot(fcx - cam.x, fcy - cam.y, fcz - cam.z);
-      const sub = 4095 - Math.min(4095, Math.floor((fd / (this.renderDistance + 2)) * 4095));
-      const color = palette.id(rgb[0] * shade, rgb[1] * shade, rgb[2] * shade, alpha, sky, lampLevel);
-      if (!this.pushPoly(4, order, sub, fog, color, 0.3)) continue;
+      const sub = 65535 - Math.min(65535, Math.floor((fd / (this.renderDistance + 2)) * 65535));
 
-      if (fi === 0 && faceDecals && dist < 24) {
-        // Front face corners: a = top-left, b = top-right, c = bottom-right, d = bottom-left (seen from the front)
-        for (const dc of faceDecals) {
-          for (let k = 0; k < 4; k++) {
-            const uu = k === 0 || k === 3 ? dc[0] : dc[2], vv = k < 2 ? dc[1] : dc[3];
-            tx[k] = wx[a] + (wx[b] - wx[a]) * uu + (wx[d] - wx[a]) * vv;
-            ty[k] = wy[a] + (wy[b] - wy[a]) * uu + (wy[d] - wy[a]) * vv;
-            tz[k] = wz[a] + (wz[b] - wz[a]) * uu + (wz[d] - wz[a]) * vv;
+      if (tex) {
+        const t = tex[BOX_DIR[fi]], lod = this.lodFor(t, dist * lodScale);
+        const k = shade / 255, kr = rgb[0] * k, kg = rgb[1] * k, kb = rgb[2] * k;
+        const base = lod ? lod.tones[lod.base] : t.avg;
+        this.latchQuad();
+        if (!this.pushPoly(4, order, sub, fog, palette.id(base[0] * kr, base[1] * kg, base[2] * kb, alpha, sky, lampLevel), 0.3)) continue;
+        if (lod) {
+          const rc = lod.rects, inv = 1 / lod.n;
+          for (let r = 0; r < rc.length; r += 5) {
+            const tc = lod.tones[rc[r + 4]];
+            this.pushCell(rc[r] * inv, rc[r + 1] * inv, rc[r + 2] * inv, rc[r + 3] * inv, order, sub, fog, palette.id(tc[0] * kr, tc[1] * kg, tc[2] * kb, alpha, sky, lampLevel), 0.2);
           }
-          this.toCamera(4);
-          const dcol = palette.id(dc[4] * shade, dc[5] * shade, dc[6] * shade, 255, sky, lampLevel);
-          this.pushPoly(4, order, sub, fog, dcol, 0);
         }
+        continue;
+      }
+
+      const color = palette.id(rgb[0] * shade, rgb[1] * shade, rgb[2] * shade, alpha, sky, lampLevel);
+      if (faceDecals && fi === 0 && dist < 24) this.latchQuad();
+      if (!this.pushPoly(4, order, sub, fog, color, 0.3)) continue;
+      if (fi === 0 && faceDecals && dist < 24) {
+        // Front face: u runs left to right, v top to bottom as seen from the front.
+        for (const dc of faceDecals) this.pushCell(dc[0], dc[1], dc[2], dc[3], order, sub, fog, palette.id(dc[4] * shade, dc[5] * shade, dc[6] * shade, 255, sky, lampLevel), 0);
       }
     }
+  }
+
+  /** Upright, camera-facing sprite (dropped non-block items). */
+  drawSpriteBillboard(x: number, y: number, z: number, size: number, tex: Tex, sky: number, lamp = 0) {
+    const cam = this.cam;
+    const dist = Math.hypot(x - cam.x, y - cam.y, z - cam.z);
+    if (dist > this.renderDistance) return;
+    const h = size / 2, rx = cam.cosY * h, rz = -cam.sinY * h;
+    const tx = this.tx, ty = this.ty, tz = this.tz;
+    tx[0] = x - rx; ty[0] = y + size; tz[0] = z - rz;
+    tx[1] = x + rx; ty[1] = y + size; tz[1] = z + rz;
+    tx[3] = x - rx; ty[3] = y; tz[3] = z - rz;
+    tx[2] = x + rx; ty[2] = y; tz[2] = z + rz;
+    this.toCamera(4);
+    this.latchQuad();
+    const bucket = Math.min(MAX_BUCKET, Math.abs(Math.floor(x) - this.camCell[0]) + Math.abs(Math.floor(y) - this.camCell[1]) + Math.abs(Math.floor(z) - this.camCell[2]));
+    const sub = 65535 - Math.min(65535, Math.floor((dist / (this.renderDistance + 2)) * 65535));
+    const lod = this.lodFor(tex, dist * 2.2) ?? tex.lods[tex.lods.length - 1];
+    this.pushSprite(lod, (MAX_BUCKET - bucket) * 4 + Layer.ENTITY, sub, this.fogLevel(dist), sky, lamp, 1);
   }
 
   /** Camera-facing square, used for particles. */
@@ -397,19 +581,82 @@ export class Renderer3D {
     this.cxs[2] = xc + h; this.cys[2] = yc - h; this.czs[2] = zc;
     this.cxs[3] = xc - h; this.cys[3] = yc - h; this.czs[3] = zc;
     const bucket = Math.min(MAX_BUCKET, Math.abs(Math.floor(x) - this.camCell[0]) + Math.abs(Math.floor(y) - this.camCell[1]) + Math.abs(Math.floor(z) - this.camCell[2]));
-    const sub = 4095 - Math.min(4095, Math.floor((dist / (this.renderDistance + 2)) * 4095));
+    const sub = 65535 - Math.min(65535, Math.floor((dist / (this.renderDistance + 2)) * 65535));
     this.pushPoly(4, (MAX_BUCKET - bucket) * 4 + Layer.ENTITY, sub, this.fogLevel(dist), palette.id(rgb[0], rgb[1], rgb[2], alpha, sky, lampLevel), 0);
+  }
+
+  /**
+   * First person hand. Geometry is built directly in camera space (x right, y up, z forward)
+   * and drawn above everything else.
+   */
+  drawHeld(hv: HeldView) {
+    const sw = Math.sin(hv.swing * Math.PI);
+    const ox = 0.62 + hv.bobX - sw * 0.24, oy = -0.5 + hv.bobY - hv.drop * 0.5 + sw * 0.1, oz = 1.05 - sw * 0.1;
+    const rotX = -sw * 0.9, xs = this.cxs, ys = this.cys, zs = this.czs;
+    const fovK = Math.tan((70 * Math.PI) / 360) / Math.tan((this.cam.fov * Math.PI) / 360); // keep the hand size stable when the FOV changes
+    const place = (lx: number, ly: number, lz: number, ry: number, rx: number, i: number) => {
+      const c1 = Math.cos(ry), s1 = Math.sin(ry);
+      const x1 = lx * c1 + lz * s1, z1 = -lx * s1 + lz * c1;
+      const c2 = Math.cos(rx + rotX), s2 = Math.sin(rx + rotX);
+      const y2 = ly * c2 - z1 * s2, z2 = ly * s2 + z1 * c2;
+      hx[i] = (ox + x1) / fovK; hy[i] = (oy + y2) / fovK; hz[i] = oz + z2;
+    };
+
+    if (hv.sprite) {
+      // A flat item held upright and slightly turned inwards.
+      const s = 0.62, ry = 0.6, rx = -0.12, up = 0.1;
+      place(-s / 2, s / 2 + up, 0, ry, rx, 0); place(s / 2, s / 2 + up, 0, ry, rx, 1); place(s / 2, -s / 2 + up, 0, ry, rx, 2); place(-s / 2, -s / 2 + up, 0, ry, rx, 3);
+      for (let k = 0; k < 4; k++) { xs[k] = hx[k]; ys[k] = hy[k]; zs[k] = hz[k]; }
+      this.latchQuad();
+      const lod = hv.sprite.lods[0], rc = lod.rects;
+      for (let r = 0; r < rc.length; r += 5) {
+        const c = lod.tones[rc[r + 4]];
+        const id = palette.id(c[0], c[1], c[2], 255, hv.sky, hv.lamp);
+        this.pushCell(rc[r] / 16, rc[r + 1] / 16, rc[r + 2] / 16, rc[r + 3] / 16, HAND_ORDER, 1 + rc[r + 4], 0, id, 0.3);
+      }
+      return;
+    }
+
+    const isBlock = hv.block > 0;
+    const sx = isBlock ? 0.4 : 0.2, syy = isBlock ? 0.4 : 0.75, sz = isBlock ? 0.4 : 0.2;
+    const ry = isBlock ? 0.7 : 0.35, rx = isBlock ? 0.12 : 1.05;
+    for (let i = 0; i < 8; i++) place((i & 1 ? 0.5 : -0.5) * sx, (i & 2 ? 0.5 : -0.5) * syy - (isBlock ? 0 : 0.1), (i & 4 ? 0.5 : -0.5) * sz, ry, rx, i);
+    const tex = isBlock ? blockTextures(hv.block) : null;
+    for (let fi = 0; fi < 6; fi++) {
+      const f = BOX_FACES[fi], a = f[0], b = f[1], c = f[2], d = f[3];
+      const e1x = hx[b] - hx[a], e1y = hy[b] - hy[a], e1z = hz[b] - hz[a];
+      const e2x = hx[d] - hx[a], e2y = hy[d] - hy[a], e2z = hz[d] - hz[a];
+      const nx = e2y * e1z - e2z * e1y, ny = e2z * e1x - e2x * e1z, nz = e2x * e1y - e2y * e1x;
+      const fcx = (hx[a] + hx[c]) / 2, fcy = (hy[a] + hy[c]) / 2, fcz = (hz[a] + hz[c]) / 2;
+      if (nx * -fcx + ny * -fcy + nz * -fcz <= 0) continue;
+      const shade = DIR_SHADE[BOX_DIR[fi]];
+      xs[0] = hx[a]; ys[0] = hy[a]; zs[0] = hz[a]; xs[1] = hx[b]; ys[1] = hy[b]; zs[1] = hz[b];
+      xs[2] = hx[c]; ys[2] = hy[c]; zs[2] = hz[c]; xs[3] = hx[d]; ys[3] = hy[d]; zs[3] = hz[d];
+      this.latchQuad();
+      if (tex) {
+        const lod = tex[BOX_DIR[fi]].lods[0], base = lod.tones[lod.base];
+        const alpha = Math.max(BLOCKS[hv.block].alpha, 170);
+        this.pushPoly(4, HAND_ORDER, 0, 0, palette.id(base[0] * shade, base[1] * shade, base[2] * shade, alpha, hv.sky, hv.lamp), 0.4);
+        const rc = lod.rects;
+        for (let r = 0; r < rc.length; r += 5) {
+          const tc = lod.tones[rc[r + 4]];
+          this.pushCell(rc[r] / 16, rc[r + 1] / 16, rc[r + 2] / 16, rc[r + 3] / 16, HAND_ORDER, 1 + rc[r + 4] + fi * 8, 0, palette.id(tc[0] * shade, tc[1] * shade, tc[2] * shade, 255, hv.sky, hv.lamp), 0.3);
+        }
+      } else {
+        this.pushPoly(4, HAND_ORDER, 0, 0, palette.id(245 * shade, 205 * shade, 48 * shade, 255, hv.sky, hv.lamp), 0.4);
+      }
+    }
   }
 
   // ------------------------------------------------------------------ emit to ThorVG
 
-  private cmdsFor(n: number, quads: number): number[] {
+  private cmdsFor(quads: number): Uint8Array {
     // Fast path: runs made only of quads share cached command arrays.
     let c = this.cmdCache[quads];
     if (!c) {
-      c = [];
-      for (let i = 0; i < quads; i++) c.push(1, 2, 2, 2, 0);
-      if (quads < 512) this.cmdCache[quads] = c;
+      c = new Uint8Array(quads * 5);
+      for (let i = 0; i < quads; i++) { const o = i * 5; c[o] = 1; c[o + 1] = 2; c[o + 2] = 2; c[o + 3] = 2; c[o + 4] = 0; }
+      if (quads < 1024) this.cmdCache[quads] = c;
     }
     return c;
   }
@@ -448,8 +695,8 @@ export class Renderer3D {
       i = j;
 
       while (ptPool.length < pts) ptPool.push([0, 0]);
-      let cmds: number[];
-      if (allQuads) cmds = this.cmdsFor(pts, j - runStart);
+      let cmds: Uint8Array | number[];
+      if (allQuads) cmds = this.cmdsFor(j - runStart);
       else cmds = [];
       let p = 0;
       for (let r = runStart; r < j; r++) {
@@ -457,7 +704,7 @@ export class Renderer3D {
         const idx = kr - Math.floor(kr / MAX_POLYS) * MAX_POLYS;
         const m = this.pN[idx];
         let o = this.pStart[idx];
-        if (!allQuads) { cmds.push(1); for (let q = 1; q < m; q++) cmds.push(2); cmds.push(0); }
+        if (!allQuads) { (cmds as number[]).push(1); for (let q = 1; q < m; q++) (cmds as number[]).push(2); (cmds as number[]).push(0); }
         for (let q = 0; q < m; q++) {
           const pt = ptPool[p++];
           pt[0] = v[o++]; pt[1] = v[o++];
@@ -580,9 +827,9 @@ export class Renderer3D {
 
   // ------------------------------------------------------------------ overlays
 
-  /** Outlines a block (and optionally shows break progress on it). */
-  drawSelection(bx: number, by: number, bz: number, progress: number) {
-    this.outline.reset(); this.crack.reset();
+  /** Outlines the targeted block. */
+  drawSelection(bx: number, by: number, bz: number) {
+    this.outline.reset();
     const e = 0.004;
     const tx = this.tx, ty = this.ty, tz = this.tz;
     for (let i = 0; i < 8; i++) {
@@ -595,19 +842,13 @@ export class Renderer3D {
     for (let i = 0; i < 8; i++) { const inv = c.focal / this.czs[i]; sx[i] = c.cx + this.cxs[i] * inv; sy[i] = c.cy - this.cys[i] * inv; }
     for (const [a, b] of BOX_EDGES) this.outline.moveTo(sx[a], sy[a]).lineTo(sx[b], sy[b]);
     this.outline.stroke({ width: 2, color: [16, 16, 20, 220], cap: 'round', join: 'round' });
-
-    if (progress > 0) {
-      for (let fi = 0; fi < 6; fi++) {
-        const q = BOX_FACES_AXIS[fi];
-        this.crack.moveTo(sx[q[0]], sy[q[0]]).lineTo(sx[q[1]], sy[q[1]]).lineTo(sx[q[2]], sy[q[2]]).lineTo(sx[q[3]], sy[q[3]]).close();
-      }
-      this.crack.fill(0, 0, 0, Math.floor(40 + progress * 130));
-    }
   }
 
-  clearSelection() { this.outline.reset(); this.crack.reset(); }
+  clearSelection() { this.outline.reset(); }
 }
 
+const ZERO: readonly [number, number, number] = [0, 0, 0];
+const hx = new Float64Array(8), hy = new Float64Array(8), hz = new Float64Array(8);
 const boxWX: number[] = new Array(8).fill(0), boxWY: number[] = new Array(8).fill(0), boxWZ: number[] = new Array(8).fill(0);
 
 // Corner index bits: 1 = +x, 2 = +y, 4 = +z. Face 0 is the front (-Z) face, listed
@@ -621,7 +862,7 @@ const BOX_FACES: ReadonlyArray<readonly number[]> = [
   [6, 2, 3, 7], // +Y top
   [0, 4, 5, 1], // -Y bottom
 ];
-const BOX_FACES_AXIS = BOX_FACES;
+const BOX_DIR = [5, 4, 1, 0, 2, 3];
 const BOX_EDGES: ReadonlyArray<readonly [number, number]> = [[0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
 
 function cloudHash(x: number, z: number) {

@@ -1,13 +1,15 @@
 // Mobs, item drops, primed TNT, gems and particles.
 
-import { B, BLOCKS, Item, iconColor } from './blocks';
+import { B, BLOCKS, CUBE, I, ITEMS, LIQUID, isBlockId } from './blocks';
 import { Body, rayBox, stepBody } from './physics';
 import { Player } from './player';
-import { Renderer3D } from './renderer';
+import { Renderer3D, blockTextures } from './renderer';
+import { texture } from './textures';
 import { CS, SEA, World } from './world';
 import { hash3 } from './math';
 
 type V3 = readonly [number, number, number];
+const ZERO: V3 = [0, 0, 0], WHITE: V3 = [255, 255, 255];
 type RGB = readonly [number, number, number];
 
 interface Part {
@@ -21,6 +23,8 @@ const DARK = [28, 28, 32] as const;
 const smile = [[0.18, 0.32, 0.36, 0.56, ...DARK], [0.64, 0.32, 0.82, 0.56, ...DARK], [0.28, 0.7, 0.72, 0.8, ...DARK], [0.2, 0.62, 0.3, 0.72, ...DARK], [0.7, 0.62, 0.8, 0.72, ...DARK]];
 const zombieFace = [[0.16, 0.34, 0.4, 0.52, 10, 10, 10], [0.6, 0.34, 0.84, 0.52, 10, 10, 10], [0.36, 0.7, 0.64, 0.86, 30, 60, 30]];
 const pigFace = [[0.08, 0.2, 0.26, 0.4, ...DARK], [0.74, 0.2, 0.92, 0.4, ...DARK]];
+const cowFace = [[0.1, 0.22, 0.26, 0.46, ...DARK], [0.74, 0.22, 0.9, 0.46, ...DARK], [0.25, 0.6, 0.75, 0.95, 222, 222, 222], [0.34, 0.74, 0.44, 0.86, 60, 60, 60], [0.56, 0.74, 0.66, 0.86, 60, 60, 60], [0.38, 0, 0.62, 0.3, 238, 238, 238]];
+const creeperFace = [[0.14, 0.24, 0.4, 0.5, 10, 10, 10], [0.6, 0.24, 0.86, 0.5, 10, 10, 10], [0.4, 0.5, 0.6, 0.86, 10, 10, 10], [0.28, 0.62, 0.4, 0.98, 10, 10, 10], [0.6, 0.62, 0.72, 0.98, 10, 10, 10]];
 const sheepFace = [[0.1, 0.25, 0.3, 0.45, ...DARK], [0.7, 0.25, 0.9, 0.45, ...DARK], [0.38, 0.62, 0.62, 0.78, 230, 150, 150]];
 
 function humanoid(head: RGB, torso: RGB, arms: RGB, legs: RGB, face: ReadonlyArray<readonly number[]>): Part[] {
@@ -34,32 +38,48 @@ function humanoid(head: RGB, torso: RGB, arms: RGB, legs: RGB, face: ReadonlyArr
   ];
 }
 
-function quadruped(body: RGB, headC: RGB, leg: RGB, face: ReadonlyArray<readonly number[]>, fat: number): Part[] {
+function quadruped(body: RGB, headC: RGB, leg: RGB, face: ReadonlyArray<readonly number[]>, fat: number, legH = 0.3, patch?: RGB): Part[] {
   const w = 0.27 + fat, parts: Part[] = [
-    { pivot: [0, 0.3, 0], o: [-w, 0, -0.45], s: [w * 2, 0.45 + fat, 0.9], rgb: body },
-    { pivot: [0, 0.44, -0.45], o: [-0.2, 0, -0.34], s: [0.4, 0.4, 0.36], rgb: headC, anim: 'head', face },
+    { pivot: [0, legH, 0], o: [-w, 0, -0.45], s: [w * 2, 0.45 + fat, 0.9], rgb: body },
+    { pivot: [0, legH + 0.14, -0.45], o: [-0.2, 0, -0.34], s: [0.4, 0.4, 0.36], rgb: headC, anim: 'head', face },
   ];
+  if (patch) parts.push({ pivot: [0, legH, 0], o: [-w - 0.01, 0.2, -0.2], s: [w * 2 + 0.02, 0.27 + fat, 0.36], rgb: patch });
   const lx = 0.17, lz = 0.3;
-  parts.push({ pivot: [-lx, 0.3, -lz], o: [-0.09, -0.3, -0.09], s: [0.18, 0.3, 0.18], rgb: leg, anim: 'legA' });
-  parts.push({ pivot: [lx, 0.3, -lz], o: [-0.09, -0.3, -0.09], s: [0.18, 0.3, 0.18], rgb: leg, anim: 'legB' });
-  parts.push({ pivot: [-lx, 0.3, lz], o: [-0.09, -0.3, -0.09], s: [0.18, 0.3, 0.18], rgb: leg, anim: 'legB' });
-  parts.push({ pivot: [lx, 0.3, lz], o: [-0.09, -0.3, -0.09], s: [0.18, 0.3, 0.18], rgb: leg, anim: 'legA' });
+  parts.push({ pivot: [-lx, legH, -lz], o: [-0.09, -legH, -0.09], s: [0.18, legH, 0.18], rgb: leg, anim: 'legA' });
+  parts.push({ pivot: [lx, legH, -lz], o: [-0.09, -legH, -0.09], s: [0.18, legH, 0.18], rgb: leg, anim: 'legB' });
+  parts.push({ pivot: [-lx, legH, lz], o: [-0.09, -legH, -0.09], s: [0.18, legH, 0.18], rgb: leg, anim: 'legB' });
+  parts.push({ pivot: [lx, legH, lz], o: [-0.09, -legH, -0.09], s: [0.18, legH, 0.18], rgb: leg, anim: 'legA' });
   return parts;
 }
 
-export type MobKind = 'pig' | 'sheep' | 'zombie';
+function creeperModel(): Part[] {
+  const g: RGB = [95, 176, 79], parts: Part[] = [
+    { pivot: [0, 0.4, 0], o: [-0.25, 0, -0.15], s: [0.5, 0.8, 0.3], rgb: g },
+    { pivot: [0, 1.2, 0], o: [-0.25, 0, -0.25], s: [0.5, 0.5, 0.5], rgb: [108, 190, 90], anim: 'head', face: creeperFace },
+  ];
+  for (const [x, z, a] of [[-0.13, -0.22, 'legA'], [0.13, -0.22, 'legB'], [-0.13, 0.22, 'legB'], [0.13, 0.22, 'legA']] as [number, number, 'legA' | 'legB'][]) {
+    parts.push({ pivot: [x, 0.4, z], o: [-0.12, -0.4, -0.12], s: [0.24, 0.4, 0.24], rgb: [80, 156, 68], anim: a });
+  }
+  return parts;
+}
+
+export type MobKind = 'pig' | 'sheep' | 'cow' | 'zombie' | 'creeper';
 
 export const MODELS = {
   avatar: humanoid([245, 205, 48], [13, 105, 172], [245, 205, 48], [75, 151, 75], smile),
   zombie: humanoid([86, 140, 72], [42, 120, 128], [86, 140, 72], [64, 58, 130], zombieFace),
   pig: quadruped([236, 150, 160], [240, 160, 170], [216, 128, 140], pigFace, 0),
-  sheep: quadruped([238, 238, 232], [196, 176, 156], [180, 160, 140], sheepFace, 0.06),
+  sheep: quadruped([238, 238, 232], [196, 176, 156], [180, 160, 140], sheepFace, 0.06, 0.42),
+  cow: quadruped([78, 56, 40], [78, 56, 40], [60, 44, 32], cowFace, 0.07, 0.5, [236, 236, 232]),
+  creeper: creeperModel(),
 };
 
-const MOB_INFO: Record<MobKind, { hw: number; h: number; hp: number; speed: number; hostile: boolean }> = {
-  pig: { hw: 0.4, h: 0.85, hp: 8, speed: 1.4, hostile: false },
-  sheep: { hw: 0.42, h: 0.95, hp: 8, speed: 1.3, hostile: false },
-  zombie: { hw: 0.3, h: 1.8, hp: 16, speed: 2.5, hostile: true },
+const MOB_INFO: Record<MobKind, { hw: number; h: number; hp: number; speed: number; hostile: boolean; drops: [number, number, number][] }> = {
+  pig: { hw: 0.4, h: 0.85, hp: 10, speed: 1.4, hostile: false, drops: [[I.PORK_RAW, 1, 3]] },
+  sheep: { hw: 0.42, h: 1.1, hp: 8, speed: 1.3, hostile: false, drops: [[B.WOOL_WHITE, 1, 2]] },
+  cow: { hw: 0.42, h: 1.3, hp: 10, speed: 1.1, hostile: false, drops: [[I.BEEF_RAW, 1, 3]] },
+  zombie: { hw: 0.3, h: 1.8, hp: 20, speed: 2.5, hostile: true, drops: [[I.ROTTEN_FLESH, 0, 2]] },
+  creeper: { hw: 0.3, h: 1.7, hp: 20, speed: 2.3, hostile: true, drops: [[I.GUNPOWDER, 1, 2]] },
 };
 
 export class Mob implements Body {
@@ -67,6 +87,8 @@ export class Mob implements Body {
   onGround = false; inWater = false; hitWall = false;
   yaw = Math.random() * 6.28; hp: number; hurt = 0; phase = 0;
   private heading = Math.random() * 6.28; private moveTimer = 0; private moving = false; private attackTimer = 0; burnTimer = 0;
+  /** Creeper countdown, explodes at 1.5 s. */
+  fuse = 0;
   dead = false;
 
   constructor(public kind: MobKind, public x: number, public y: number, public z: number) {
@@ -85,7 +107,11 @@ export class Mob implements Body {
     if (info.hostile && !player.creative && !player.dead && dist < 24 && Math.abs(dy) < 8) {
       this.heading = Math.atan2(-dx, -dz);
       this.moving = dist > 0.9;
-      if (dist < 1.3 && Math.abs(dy) < 1.6 && this.attackTimer <= 0) {
+      if (this.kind === 'creeper') {
+        if (dist < 2.8 && Math.abs(dy) < 2.5) { if (this.fuse === 0) em.hooks.sound('fuse'); this.fuse += dt; this.moving = false; }
+        else if (this.fuse > 0) this.fuse = dist > 5 ? Math.max(0, this.fuse - dt) : this.fuse + dt;
+        if (this.fuse >= 1.5) { this.dead = true; em.explode(this.x, this.y + 0.8, this.z, 3, player); return; }
+      } else if (dist < 1.3 && Math.abs(dy) < 1.6 && this.attackTimer <= 0) {
         this.attackTimer = 1;
         player.damage(3);
         const k = 7 / (dist || 1);
@@ -95,8 +121,10 @@ export class Mob implements Body {
       // Panic: run away from the player.
       this.heading = Math.atan2(dx, dz); this.moving = true; speed *= 2.4; this.moveTimer = 2;
     } else {
+      this.fuse = Math.max(0, this.fuse - dt);
       this.moveTimer -= dt;
       if (this.moveTimer <= 0) {
+        if (Math.random() < 0.06 && dist < 20) em.hooks.sound('mob');
         this.moveTimer = 1.5 + Math.random() * 4;
         this.moving = Math.random() < 0.6;
         this.heading = Math.random() * 6.28;
@@ -134,9 +162,10 @@ export class Mob implements Body {
       this.dead = true;
       const c = MODELS[this.kind][0].rgb;
       for (let i = 0; i < 14; i++) em.particle(this.x, this.y + this.h * 0.5, this.z, (Math.random() - 0.5) * 4, Math.random() * 4, (Math.random() - 0.5) * 4, c, 0.8, 0.14);
-      if (this.kind === 'pig') em.drop(Item.PORK, 1 + Math.floor(Math.random() * 2), this.x, this.y + 0.4, this.z);
-      else if (this.kind === 'sheep') em.drop(B.WOOL_WHITE, 1, this.x, this.y + 0.4, this.z);
-      else if (Math.random() < 0.35) em.drop(Item.GEM, 1, this.x, this.y + 0.4, this.z);
+      for (const [id, lo, hi] of MOB_INFO[this.kind].drops) {
+        const n = lo + Math.floor(Math.random() * (hi - lo + 1));
+        if (n > 0) em.drop(id, n, this.x, this.y + 0.4, this.z);
+      }
     }
   }
 }
@@ -144,7 +173,9 @@ export class Mob implements Body {
 class ItemDrop implements Body {
   vx: number; vy: number; vz: number; hw = 0.125; h = 0.25;
   onGround = false; inWater = false; hitWall = false; age = 0; dead = false;
-  constructor(public id: number, public count: number, public x: number, public y: number, public z: number) {
+  /** Seconds before the player can pick it up again (thrown items). */
+  delay = 0.6;
+  constructor(public id: number, public count: number, public x: number, public y: number, public z: number, public dur?: number) {
     this.vx = (Math.random() - 0.5) * 2.4; this.vy = 3 + Math.random() * 1.5; this.vz = (Math.random() - 0.5) * 2.4;
   }
 }
@@ -158,8 +189,11 @@ interface Gem { x: number; y: number; z: number; key: string }
 interface Particle { x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; max: number; size: number; rgb: RGB; glow: boolean }
 
 export interface EntityHooks {
-  pickup(id: number, count: number): number; // returns how many could not be taken
-  sound(name: 'pop' | 'gem' | 'explode' | 'fuse' | 'hit'): void;
+  pickup(id: number, count: number, dur?: number): number; // returns how many could not be taken
+  canPickup(id: number): boolean;
+  sound(name: 'pop' | 'gem' | 'explode' | 'fuse' | 'hit' | 'mob'): void;
+  /** A block was blown up; lets the game clean up furnaces and the like. */
+  blockDestroyed(x: number, y: number, z: number, id: number): void;
   shake(amount: number): void;
   gemCollected(): void;
 }
@@ -174,7 +208,7 @@ export class EntityManager {
   private spawnTimer = 2;
   private gemScan = 0;
 
-  constructor(private world: World, private hooks: EntityHooks) {}
+  constructor(private world: World, readonly hooks: EntityHooks) {}
 
   particle(x: number, y: number, z: number, vx: number, vy: number, vz: number, rgb: RGB, life: number, size: number, glow = false) {
     if (this.particles.length > 600) return;
@@ -182,15 +216,23 @@ export class EntityManager {
   }
 
   blockBurst(bx: number, by: number, bz: number, id: number, n = 14) {
-    const c = BLOCKS[id].side, t = BLOCKS[id].top;
+    const f = BLOCKS[id].faces, c = texture(f[0]).avg, t = texture(f[2]).avg;
     for (let i = 0; i < n; i++) {
       this.particle(bx + Math.random(), by + Math.random(), bz + Math.random(), (Math.random() - 0.5) * 3, Math.random() * 3.5, (Math.random() - 0.5) * 3, Math.random() < 0.5 ? c : t, 0.5 + Math.random() * 0.5, 0.1 + Math.random() * 0.08);
     }
   }
 
-  drop(id: number, count: number, x: number, y: number, z: number) {
-    if (id === 0 || this.drops.length > 150) return;
-    this.drops.push(new ItemDrop(id, count, x, y, z));
+  drop(id: number, count: number, x: number, y: number, z: number, dur?: number): ItemDrop | null {
+    if (id === 0 || !ITEMS.has(id) || this.drops.length > 150) return null;
+    const d = new ItemDrop(id, count, x, y, z, dur);
+    this.drops.push(d);
+    return d;
+  }
+
+  /** Does a block-sized box at this cell overlap any mob? */
+  blockOccupied(x: number, y: number, z: number): boolean {
+    for (const m of this.mobs) if (m.x + m.hw > x && m.x - m.hw < x + 1 && m.z + m.hw > z && m.z - m.hw < z + 1 && m.y + m.h > y && m.y < y + 1) return true;
+    return false;
   }
 
   prime(bx: number, by: number, bz: number, fuse = 3) {
@@ -208,10 +250,11 @@ export class EntityManager {
       const d = Math.hypot(dx, dy, dz);
       if (d > power + (hash3(bx, by, bz, 99) - 0.5) * 1.2) continue;
       const id = w.getBlock(bx, by, bz);
-      if (id === B.AIR || id === B.BEDROCK || id === B.WATER) continue;
-      if (id === B.TNT) { this.prime(bx, by, bz, 0.25 + Math.random() * 0.5); continue; }
+      if (id === B.AIR || LIQUID[id] || BLOCKS[id].hard < 0 || id === B.OBSIDIAN) continue;
+      if (id === B.TNT) { this.prime(bx, by, bz, 0.4 + Math.random() * 0.8); continue; }
       w.setBlock(bx, by, bz, B.AIR);
-      if (dropped < 10 && Math.random() < 0.18) { dropped++; this.drop(BLOCKS[id].drop ?? id, 1, bx + 0.5, by + 0.3, bz + 0.5); }
+      this.hooks.blockDestroyed(bx, by, bz, id);
+      if (dropped < 12 && Math.random() < 0.25) { dropped++; this.drop(BLOCKS[id].drop, 1, bx + 0.5, by + 0.3, bz + 0.5); }
     }
     for (let i = 0; i < 70; i++) {
       const a = Math.random() * 6.28, e = Math.random() * 3.14 - 1.57, s = 3 + Math.random() * 9;
@@ -246,22 +289,22 @@ export class EntityManager {
 
   private trySpawn(player: Player, night: number) {
     const w = this.world;
-    const hostile = night > 0.6 && Math.random() < 0.7;
-    const cap = hostile ? 8 : 10;
-    const count = this.mobs.filter((m) => (m.kind === 'zombie') === hostile).length;
+    const hostile = night > 0.6 && !player.creative && Math.random() < 0.65;
+    const cap = hostile ? 10 : 12;
+    const count = this.mobs.filter((m) => MOB_INFO[m.kind].hostile === hostile).length;
     if (count >= cap) return;
     const a = Math.random() * 6.28, r = 18 + Math.random() * 22;
     const x = Math.floor(player.x + Math.cos(a) * r), z = Math.floor(player.z + Math.sin(a) * r);
     if (!w.hasChunk(x >> 4, z >> 4)) return;
     const y = w.surfaceY(x, z);
     const ground = w.getBlock(x, y - 1, z);
-    if (y <= SEA || w.getBlock(x, y, z) !== B.AIR) return;
+    if (y <= SEA || w.getBlock(x, y, z) !== B.AIR || w.getBlock(x, y + 1, z) !== B.AIR) return;
     if (hostile) {
-      if (!BLOCKS[ground].solid || ground === B.LEAVES || ground === B.BIRCH_LEAVES) return;
-      this.mobs.push(new Mob('zombie', x + 0.5, y, z + 0.5));
+      if (!BLOCKS[ground].solid || ground === B.LEAVES || ground === B.BIRCH_LEAVES || ground === B.SPRUCE_LEAVES) return;
+      this.mobs.push(new Mob(Math.random() < 0.65 ? 'zombie' : 'creeper', x + 0.5, y, z + 0.5));
     } else {
-      if (ground !== B.GRASS && ground !== B.SNOW) return;
-      const kind: MobKind = Math.random() < 0.5 ? 'pig' : 'sheep';
+      if (ground !== B.GRASS && ground !== B.SNOWGRASS) return;
+      const kind: MobKind = (['pig', 'cow', 'sheep'] as const)[Math.floor(Math.random() * 3)];
       const n = 1 + Math.floor(Math.random() * 3);
       for (let i = 0; i < n; i++) {
         const ox = x + Math.floor(Math.random() * 5) - 2, oz = z + Math.floor(Math.random() * 5) - 2;
@@ -301,11 +344,11 @@ export class EntityManager {
     for (const it of this.drops) {
       it.age += dt;
       const dx = player.x - it.x, dy = player.y + 0.8 - it.y, dz = player.z - it.z, d = Math.hypot(dx, dy, dz);
-      if (it.age > 0.6 && d < 2.2 && !player.dead) {
+      if (it.age > it.delay && d < 2.2 && !player.dead && this.hooks.canPickup(it.id)) {
         // Magnet toward the player
         it.vx += (dx / d) * 40 * dt; it.vy += (dy / d) * 40 * dt; it.vz += (dz / d) * 40 * dt;
         if (d < 0.9) {
-          const left = this.hooks.pickup(it.id, it.count);
+          const left = this.hooks.pickup(it.id, it.count, it.dur);
           if (left < it.count) this.hooks.sound('pop');
           it.count = left;
           if (left === 0) it.dead = true;
@@ -313,7 +356,7 @@ export class EntityManager {
       }
       if (it.onGround) { it.vx *= Math.pow(0.002, dt); it.vz *= Math.pow(0.002, dt); }
       stepBody(w, it, dt, 22);
-      if (it.age > 180 || it.y < -10) it.dead = true;
+      if (it.age > 300 || it.y < -10) it.dead = true;
     }
     this.drops = this.drops.filter((d) => !d.dead);
 
@@ -322,7 +365,7 @@ export class EntityManager {
       if (t.onGround) { t.vx *= Math.pow(0.001, dt); t.vz *= Math.pow(0.001, dt); }
       stepBody(w, t, dt, 27);
       if (Math.random() < dt * 20) this.particle(t.x, t.y + 1.05, t.z, (Math.random() - 0.5) * 0.4, 1.2, (Math.random() - 0.5) * 0.4, [230, 230, 230], 0.6, 0.09);
-      if (t.fuse <= 0) { t.dead = true; this.explode(t.x, t.y + 0.5, t.z, 4.2, player); }
+      if (t.fuse <= 0) { t.dead = true; this.explode(t.x, t.y + 0.5, t.z, 4, player); }
     }
     this.tnts = this.tnts.filter((t) => !t.dead);
 
@@ -340,6 +383,7 @@ export class EntityManager {
       p.life -= dt;
       p.vy -= (p.glow ? 3 : 16) * dt;
       const nx = p.x + p.vx * dt, ny = p.y + p.vy * dt, nz = p.z + p.vz * dt;
+      if (!w.isLoaded(nx, nz)) { p.life = 0; continue; }
       if (BLOCKS[w.getBlock(Math.floor(nx), Math.floor(ny), Math.floor(nz))].solid) { p.vx *= 0.3; p.vz *= 0.3; p.vy = 0; }
       else { p.x = nx; p.y = ny; p.z = nz; }
     }
@@ -353,7 +397,7 @@ export class EntityManager {
     return y >= top ? 0 : top - y <= 6 ? 1 : 2;
   }
 
-  drawModel(r: Renderer3D, parts: Part[], x: number, y: number, z: number, yaw: number, phase: number, amp: number, headPitch: number, armPose: number, flash: number, armSwing = 0) {
+  drawModel(r: Renderer3D, parts: Part[], x: number, y: number, z: number, yaw: number, phase: number, amp: number, headPitch: number, armPose: number, flash: number, armSwing = 0, white = false) {
     const sky = this.skyAt(x, y + 0.5, z);
     const sw = Math.sin(phase) * amp;
     for (const p of parts) {
@@ -361,7 +405,7 @@ export class EntityManager {
       if (p.anim === 'legA') swing = sw; else if (p.anim === 'legB') swing = -sw;
       else if (p.anim === 'armA') swing = armPose + -sw * 0.8; else if (p.anim === 'armB') swing = armPose + sw * 0.8 + armSwing;
       else if (p.anim === 'head') swing = headPitch;
-      const c = flash > 0 ? ([Math.min(255, p.rgb[0] + 140), p.rgb[1] * 0.45, p.rgb[2] * 0.45] as const) : p.rgb;
+      const c = flash <= 0 ? p.rgb : white ? ([235, 235, 235] as const) : ([Math.min(255, p.rgb[0] + 140), p.rgb[1] * 0.45, p.rgb[2] * 0.45] as const);
       r.drawBox(x, y, z, yaw, p.pivot, p.o, p.s, swing, c, sky, 0, p.face);
     }
   }
@@ -369,17 +413,20 @@ export class EntityManager {
   draw(r: Renderer3D, time: number) {
     for (const m of this.mobs) {
       const amp = Math.min(0.9, Math.hypot(m.vx, m.vz) * 0.35);
-      this.drawModel(r, MODELS[m.kind], m.x, m.y, m.z, m.yaw, m.phase, amp, 0, m.kind === 'zombie' ? 1.45 : 0, m.hurt);
+      // A creeper about to blow flashes white.
+      const flash = m.fuse > 0 && Math.sin(m.fuse * 22) > 0 ? 1 : m.hurt;
+      this.drawModel(r, MODELS[m.kind], m.x, m.y, m.z, m.yaw, m.phase, amp, 0, m.kind === 'zombie' ? 1.45 : 0, flash, 0, m.fuse > 0 && m.hurt <= 0);
     }
     for (const it of this.drops) {
-      const c = iconColor(it.id);
-      const bobY = it.y + 0.12 + Math.sin(it.age * 3) * 0.06;
-      r.drawBox(it.x, bobY, it.z, it.age * 1.8, [0, 0, 0], [-0.13, 0, -0.13], [0.26, 0.26, 0.26], 0, c, this.skyAt(it.x, it.y, it.z), it.id === Item.GEM ? 3 : 0);
+      const bobY = it.y + 0.12 + Math.sin(it.age * 3) * 0.06, sky = this.skyAt(it.x, it.y, it.z);
+      if (isBlockId(it.id) && CUBE[it.id]) r.drawBox(it.x, bobY, it.z, it.age * 1.8, ZERO, [-0.13, 0, -0.13], [0.26, 0.26, 0.26], 0, WHITE, sky, BLOCKS[it.id].light ? 3 : 0, undefined, 255, 0, blockTextures(it.id), 3);
+      else r.drawSpriteBillboard(it.x, bobY - 0.05, it.z, 0.42, texture(ITEMS.get(it.id)!.icon), sky);
     }
     for (const t of this.tnts) {
-      const blink = Math.floor(t.fuse * 5) % 2 === 0;
+      const blink = Math.sin(t.fuse * 14) > 0;
       const s = 0.98 + (t.fuse < 0.4 ? (0.4 - t.fuse) * 0.6 : 0);
-      r.drawBox(t.x, t.y, t.z, 0, [0, 0, 0], [-s / 2, 0, -s / 2], [s, s, s], 0, blink ? [255, 255, 255] : [200, 60, 48], 0, blink ? 3 : 0);
+      if (blink) r.drawBox(t.x, t.y, t.z, 0, ZERO, [-s / 2, 0, -s / 2], [s, s, s], 0, [255, 255, 255], 0, 3);
+      else r.drawBox(t.x, t.y, t.z, 0, ZERO, [-s / 2, 0, -s / 2], [s, s, s], 0, WHITE, this.skyAt(t.x, t.y, t.z), 0, undefined, 255, 0, blockTextures(B.TNT));
     }
     for (const g of this.gems.values()) {
       const y = g.y + Math.sin(time * 2 + g.x) * 0.15;

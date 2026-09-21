@@ -8,6 +8,8 @@ export class Input {
   buttons = [false, false, false];
   clicked = [false, false, false]; // went down this frame
   wheel = 0;
+  /** Characters typed this frame ('\b' = backspace), for text fields. */
+  typed = '';
   locked = false;
   onLockChange: ((locked: boolean) => void) | null = null;
 
@@ -15,6 +17,8 @@ export class Input {
     window.addEventListener('keydown', (e) => {
       if (e.code === 'Tab' || e.code === 'Space' || e.code.startsWith('Arrow') || e.code === 'F3' || e.code === 'F5') e.preventDefault();
       if (!e.repeat) this.pressed.add(e.code);
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) this.typed += e.key; else if (e.key === 'Backspace') this.typed += '\b';
+      if (e.ctrlKey && this.locked) e.preventDefault();
       this.keys.add(e.code);
     });
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
@@ -48,6 +52,6 @@ export class Input {
   endFrame() {
     this.pressed.clear();
     this.clicked.fill(false);
-    this.mouseDX = 0; this.mouseDY = 0; this.wheel = 0;
+    this.mouseDX = 0; this.mouseDY = 0; this.wheel = 0; this.typed = '';
   }
 }

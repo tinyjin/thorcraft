@@ -3,29 +3,32 @@
 import ThorVG from '@thorvg/webcanvas';
 import wasmUrl from '../node_modules/@thorvg/webcanvas/dist/thorvg.wasm?url';
 import { Sfx } from './audio';
-import { B, BLOCKS, Item } from './blocks';
+import { B, BLOCKS, CUBE, I, ITEMS, REPLACEABLE, SOLID, TOOL_SPEED, isBlockId } from './blocks';
 import { EntityManager, MODELS, Mob, MobKind } from './entities';
-import { Hud, HudInfo } from './hud';
+import { Hud, HudInfo, Settings, WindowKind } from './hud';
 import { Input } from './input';
-import { HOTBAR, Inventory } from './inventory';
+import { Furnace, HOTBAR, Inventory, Stack, WindowState, makeStack, tickFurnace } from './inventory';
 import { clamp, lerp, smooth } from './math';
 import { RayHit, raycast } from './physics';
 import { EYE, Player } from './player';
-import { Camera, Environment, Renderer3D } from './renderer';
-import { World } from './world';
+import { Camera, Environment, HeldView, Renderer3D } from './renderer';
+import { texture } from './textures';
+import { BIOME_NAMES, Biome, SEA, WH, World } from './world';
 
-type State = 'title' | 'loading' | 'playing' | 'paused' | 'inventory' | 'dead';
+type State = 'title' | 'loading' | 'playing' | 'paused' | 'window' | 'dead';
 type RendererName = 'gl' | 'wg' | 'sw';
 
-const SAVE_KEY = 'thorcraft.save.v1';
-const DAY_LENGTH = 600; // seconds
-const REACH = 5.5;
+const SAVE_KEY = 'thorcraft.save.v2', SETTINGS_KEY = 'thorcraft.settings';
+const DAY_LENGTH = 720; // seconds
 
 interface SaveData {
-  seed: number; edits: Record<string, number[]>; creative: boolean; time: number; gems: number; collected: string[];
+  seedText: string; edits: Record<string, number[]>; creative: boolean; time: number; gems: number; collected: string[];
+  spawn: [number, number];
   player: { x: number; y: number; z: number; yaw: number; pitch: number; health: number };
-  inv: ({ id: number; count: number } | null)[]; selected: number;
+  inv: (Stack | null)[]; selected: number; furnaces: Furnace[];
 }
+
+function hashString(s: string) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h | 0; }
 
 function pickRenderer(): RendererName {
   const q = new URLSearchParams(location.search).get('renderer');
@@ -52,8 +55,13 @@ async function boot() {
   const el = document.querySelector<HTMLCanvasElement>('#game')!;
   document.getElementById('boot')?.remove();
 
+  const settings: Settings = { renderDist: rendererName === 'sw' ? 2 : 4, fov: 75, sens: 10, vol: 5, auto: true };
+  try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch { /* ignore */ }
+  const saveSettings = () => { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* ignore */ } };
+
   const input = new Input(el);
   const sfx = new Sfx();
+  sfx.volume = settings.vol / 10;
   const r3d = new Renderer3D(TVG);
   const hud = new Hud(TVG, input, 'ui');
   canvas.add(r3d.skyScene).add(r3d.scene).add(r3d.overlayScene).add(hud.scene);
@@ -61,10 +69,16 @@ async function boot() {
   const cam = new Camera();
   const player = new Player();
   let inv = new Inventory();
+  const win = new WindowState();
+  let winKind: WindowKind = 'inventory';
+  let openFurnace: Furnace | null = null;
+  let furnaces = new Map<string, Furnace>();
   let world = new World(1337);
   let entities!: EntityManager;
   let state: State = 'title';
   let creative = false;
+  let seedText = '';
+  let spawn: [number, number] = [8, 8];
   let dayTime = 0.08; // 0 sunrise, 0.25 noon, 0.5 sunset, 0.75 midnight
   let gems = 0;
   let clock = 0;
@@ -72,27 +86,32 @@ async function boot() {
   let debug = params.has('debug');
   let showMap = true;
   let shake = 0;
-  let toast = '', toastTimer = 0;
+  let toast = '', toastTimer = 0, nameTimer = 0;
   let target: RayHit | null = null;
-  let breaking: { x: number; y: number; z: number; t: number } | null = null;
-  let actionCooldown = 0, placeCooldown = 0, digSoundTimer = 0;
-  let autoQuality = true, maxDistance = 64, frameAvg = 16, qualityTimer = 0;
+  const mining = { x: 0, y: 0, z: 0, progress: 0, soundT: 0, active: false };
+  let breakCd = 0, useCd = 0, attackCd = 0;
+  let frameAvg = 16, qualityTimer = 0;
   let saveTimer = 0, pausedAt = 0;
-  let loadingTotal = 1;
+  let loadFrames = 0;
   let fps = 60, fpsAcc = 0, fpsFrames = 0;
-  r3d.renderDistance = rendererName === 'sw' ? 36 : 56;
-  if (params.has('dist')) { r3d.renderDistance = clamp(Number(params.get('dist')) || 56, 16, 80); autoQuality = false; }
+  let heldId = -1, handDrop = 0;
+  const fixedDist = params.has('dist');
+  r3d.renderDistance = fixedDist ? clamp(Number(params.get('dist')) || 56, 16, 96) : settings.renderDist * 16;
+  if (fixedDist) settings.auto = false;
 
   const say = (msg: string) => { toast = msg; toastTimer = 3; };
+  const fkey = (x: number, y: number, z: number) => `${x},${y},${z}`;
 
   const hooks = {
-    pickup: (id: number, count: number) => (creative ? 0 : inv.add(id, count)),
-    sound: (n: 'pop' | 'gem' | 'explode' | 'fuse' | 'hit') => sfx[n](),
+    pickup: (id: number, count: number, dur?: number) => inv.add(id, count, dur),
+    canPickup: (id: number) => inv.canAdd(id, 1),
+    sound: (n: 'pop' | 'gem' | 'explode' | 'fuse' | 'hit' | 'mob') => sfx[n](),
     shake: (a: number) => { shake = Math.max(shake, a); },
     gemCollected: () => { gems++; say(`Gem found! (${gems})`); },
+    blockDestroyed: (x: number, y: number, z: number, id: number) => { if (id === B.FURNACE || id === B.FURNACE_LIT) spillFurnace(x, y, z); },
   };
-  player.onStep = () => sfx.step();
-  player.onHurt = () => sfx.hurt();
+  player.onStep = () => sfx.step(player.groundBlock);
+  player.onHurt = () => { sfx.hurt(); shake = Math.max(shake, 0.35); };
   player.onSplash = () => sfx.splash();
 
   // ------------------------------------------------------------------ save / load
@@ -102,55 +121,67 @@ async function boot() {
   };
 
   const writeSave = () => {
-    if (!entities) return;
+    if (!entities || state === 'title' || state === 'loading') return;
     const data: SaveData = {
-      seed: world.seed, edits: world.serializeEdits(), creative, time: dayTime, gems, collected: [...entities.collectedGems],
-      player: { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch, health: player.health },
-      inv: inv.slots, selected: inv.selected,
+      seedText, edits: world.serializeEdits(), creative, time: dayTime, gems, collected: [...entities.collectedGems], spawn,
+      player: { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch, health: player.dead ? 20 : player.health },
+      inv: inv.slots, selected: inv.selected, furnaces: [...furnaces.values()],
     };
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch { /* quota, ignore */ }
   };
 
-  const starterKit = () => {
-    inv = new Inventory();
-    if (creative) {
-      [B.GRASS, B.STONE, B.PLANKS, B.BRICK, B.GLASS, B.LAMP, B.TNT, B.LOG, B.WOOL_RED].forEach((id, i) => (inv.slots[i] = { id, count: 64 }));
-    } else {
-      inv.add(B.PLANKS, 16); inv.add(B.LAMP, 4); inv.add(B.TNT, 3); inv.add(Item.PORK, 2);
+  /** Spirals outwards over the terrain function until it finds dry land, without generating chunks. */
+  const findSpawn = (w: World): [number, number] => {
+    const t = { h: 0, biome: 0, temp: 0, hum: 0 };
+    for (let r = 0; r < 300; r++) {
+      const a = r * 2.4, d = r * 10;
+      const x = Math.round(Math.cos(a) * d), z = Math.round(Math.sin(a) * d);
+      w.terrain(x, z, t);
+      if (t.h > SEA + 1 && t.h < SEA + 26 && t.biome !== Biome.OCEAN) return [x, z];
     }
+    return [0, 0];
   };
 
-  const startWorld = (save: SaveData | null) => {
-    const seed = save ? save.seed : params.has('seed') ? Number(params.get('seed')) | 0 : (Math.random() * 2 ** 31) | 0;
-    world = new World(seed);
+  const bindWorld = (w: World) => {
+    w.onPop = (x, y, z, id) => { const d = BLOCKS[id].drop; if (d) entities.drop(d, 1, x + 0.5, y + 0.4, z + 0.5); };
+  };
+
+  const startWorld = (save: SaveData | null, newCreative = false, newSeed = '') => {
+    seedText = save ? save.seedText : newSeed || (params.get('seed') ?? String(Math.floor(Math.random() * 1e9)));
+    world = new World(hashString(seedText));
+    bindWorld(world);
     entities = new EntityManager(world, hooks);
+    inv = new Inventory();
+    furnaces = new Map();
     if (save) {
       world.loadEdits(save.edits);
-      creative = save.creative; dayTime = save.time; gems = save.gems;
+      creative = save.creative; dayTime = save.time; gems = save.gems; spawn = save.spawn ?? [8, 8];
       entities.collectedGems = new Set(save.collected);
-      inv = new Inventory();
-      inv.slots = save.inv.map((s) => (s ? { ...s } : null));
-      inv.selected = save.selected;
+      inv.load(save.inv, save.selected);
+      for (const f of save.furnaces ?? []) furnaces.set(fkey(f.x, f.y, f.z), f);
       Object.assign(player, { x: save.player.x, y: save.player.y, z: save.player.z, yaw: save.player.yaw, pitch: save.player.pitch });
       player.vx = player.vy = player.vz = 0;
       player.health = save.player.health > 0 ? save.player.health : 20;
       player.dead = false;
     } else {
-      dayTime = 0.08; gems = 0;
-      starterKit();
-      player.spawnAt(world, 8, 8);
+      creative = newCreative; dayTime = 0.08; gems = 0;
+      if (creative) [B.GRASS, B.STONE, B.PLANKS, B.LOG, B.GLASS, B.BRICK, B.TORCH, B.TNT, B.GLOWSTONE].forEach((id, i) => (inv.slots[i] = makeStack(id, 64)));
+      spawn = findSpawn(world);
+      player.spawnAt(world, spawn[0], spawn[1]);
       player.yaw = 0.6; player.pitch = -0.1;
     }
     player.creative = creative;
+    cameraMode = 0;
     state = 'loading';
-    loadingTotal = 0;
+    loadFrames = 0;
   };
 
   // A world to look at behind the title screen.
-  entities = new EntityManager(world, hooks);
   const existing = readSave();
-  if (existing) { world = new World(existing.seed); world.loadEdits(existing.edits); entities = new EntityManager(world, hooks); }
-  const titleCenter = existing ? [existing.player.x, existing.player.z] : [8, 8];
+  if (existing) { world = new World(hashString(existing.seedText)); world.loadEdits(existing.edits); }
+  bindWorld(world);
+  entities = new EntityManager(world, hooks);
+  const titleCenter: [number, number] = existing ? [existing.player.x, existing.player.z] : findSpawn(world);
 
   // ------------------------------------------------------------------ environment
 
@@ -168,7 +199,8 @@ async function boot() {
     env.zenith = [lerp(6, 72, day), lerp(8, 134, day), lerp(24, 232, day)];
     env.fog = [lerp(lerp(14, 182, day), 250, dusk * 0.75), lerp(lerp(18, 212, day), 150, dusk * 0.7), lerp(lerp(38, 246, day), 96, dusk * 0.7)];
     env.sun = [lerp(0.2, 1, day) + dusk * 0.06, lerp(0.22, 1, day) - dusk * 0.06, lerp(0.36, 1, day) - dusk * 0.16];
-    if (player.headInWater && state !== 'title') {
+    env.underwater = player.headInWater && state !== 'title';
+    if (env.underwater) {
       env.fog = [env.fog[0] * 0.2 + 8, env.fog[1] * 0.4 + 24, env.fog[2] * 0.6 + 60];
       env.zenith = env.fog;
     }
@@ -179,70 +211,161 @@ async function boot() {
 
   const lookDir = (): [number, number, number] => [-Math.sin(player.yaw) * Math.cos(player.pitch), Math.sin(player.pitch), -Math.cos(player.yaw) * Math.cos(player.pitch)];
 
-  const breakBlock = (h: RayHit) => {
-    const id = h.block;
-    world.setBlock(h.x, h.y, h.z, B.AIR);
-    entities.blockBurst(h.x, h.y, h.z, id);
-    sfx.breakBlock();
-    if (!creative) {
-      const drop = BLOCKS[id].drop ?? id;
-      if (drop) entities.drop(drop, 1, h.x + 0.5, h.y + 0.3, h.z + 0.5);
+  const breakTime = (id: number, held: Stack | null): number => {
+    const d = BLOCKS[id];
+    if (d.hard < 0) return Infinity;
+    if (creative || d.hard === 0) return 0;
+    const tool = held ? ITEMS.get(held.id)?.tool : undefined;
+    const match = !!tool && tool.type === d.mine;
+    const tier = match ? tool!.tier : 0;
+    return !d.tier || tier >= d.tier ? (d.hard * 1.5) / (match ? TOOL_SPEED[tier] : 1) : d.hard * 5;
+  };
+
+  const canHarvest = (id: number, held: Stack | null): boolean => {
+    const d = BLOCKS[id];
+    if (!d.tier) return true;
+    const tool = held ? ITEMS.get(held.id)?.tool : undefined;
+    return !!tool && tool.type === d.mine && tool.tier >= d.tier;
+  };
+
+  const spawnDrops = (id: number, x: number, y: number, z: number) => {
+    const d = BLOCKS[id];
+    if (d.drop) entities.drop(d.drop, 1, x + 0.5, y + 0.4, z + 0.5);
+    else if ((id === B.LEAVES || id === B.BIRCH_LEAVES) && Math.random() < 0.07) entities.drop(I.APPLE, 1, x + 0.5, y + 0.4, z + 0.5);
+    else if (id === B.SPRUCE_LEAVES && Math.random() < 0.05) entities.drop(I.STICK, 1, x + 0.5, y + 0.4, z + 0.5);
+  };
+
+  function spillFurnace(x: number, y: number, z: number) {
+    const k = fkey(x, y, z), f = furnaces.get(k);
+    if (!f) return;
+    for (const s of f.slots) if (s) entities.drop(s.id, s.count, x + 0.5, y + 0.5, z + 0.5, s.dur);
+    furnaces.delete(k);
+  }
+
+  const destroyBlock = (x: number, y: number, z: number, drop: boolean) => {
+    const id = world.getBlock(x, y, z);
+    if (!id) return;
+    if (id === B.FURNACE || id === B.FURNACE_LIT) spillFurnace(x, y, z);
+    world.setBlock(x, y, z, B.AIR);
+    sfx.breakBlock(id);
+    entities.blockBurst(x, y, z, id, 16);
+    if (drop) spawnDrops(id, x, y, z);
+  };
+
+  const dropStack = (s: Stack) => {
+    const d = lookDir();
+    const e = entities.drop(s.id, s.count, player.x + d[0] * 0.4, player.y + EYE - 0.3, player.z + d[2] * 0.4, s.dur);
+    if (e) { e.vx = d[0] * 6; e.vy = d[1] * 6 + 1.5; e.vz = d[2] * 6; e.delay = 1.5; }
+  };
+
+  const openWindow = (kind: WindowKind, furnace: Furnace | null = null) => {
+    winKind = kind; openFurnace = furnace;
+    win.craftSize = kind === 'crafting' ? 3 : 2;
+    win.refresh();
+    state = 'window';
+    input.unlock();
+    sfx.click();
+  };
+
+  const closeWindow = () => {
+    win.close(inv, dropStack);
+    openFurnace = null;
+    state = 'playing';
+    input.lock();
+  };
+
+  const use = (t: RayHit | null, held: Stack | null) => {
+    const sneak = input.keys.has('ShiftLeft');
+    if (t && !sneak) {
+      if (t.block === B.CRAFTING_TABLE) { openWindow('crafting'); return; }
+      if (t.block === B.FURNACE || t.block === B.FURNACE_LIT) {
+        const k = fkey(t.x, t.y, t.z);
+        if (!furnaces.has(k)) furnaces.set(k, { x: t.x, y: t.y, z: t.z, slots: [null, null, null], burn: 0, burnMax: 0, cook: 0 });
+        openWindow('furnace', furnaces.get(k)!);
+        return;
+      }
+      if (t.block === B.TNT) { entities.prime(t.x, t.y, t.z, 4); player.swing = 1; return; }
     }
+    if (!held) return;
+    const def = ITEMS.get(held.id)!;
+    if (def.food) {
+      if (player.health < 20 || creative) { player.health = Math.min(20, player.health + def.food); if (!creative) inv.consumeHeld(); sfx.eat(); useCd = 0.8; }
+      return;
+    }
+    if (!isBlockId(held.id) || !t) return;
+    let x = t.x, y = t.y, z = t.z;
+    if (!REPLACEABLE[t.block]) { x += t.nx; y += t.ny; z += t.nz; }
+    if (y < 1 || y >= WH || !REPLACEABLE[world.getBlock(x, y, z)]) return;
+    const id = held.id, below = world.getBlock(x, y - 1, z), bd = BLOCKS[id];
+    if (bd.render === 'torch' && !SOLID[below]) return;
+    if (id === B.CACTUS && below !== B.SAND && below !== B.CACTUS) return;
+    if (bd.render === 'cross') {
+      const ok = id === B.DEADBUSH ? below === B.SAND || below === B.DIRT || below === B.GRASS : below === B.GRASS || below === B.DIRT || below === B.SNOWGRASS;
+      if (!ok) return;
+    }
+    if (SOLID[id] && (player.intersectsCell(x, y, z) || entities.blockOccupied(x, y, z))) return;
+    world.setBlock(x, y, z, id);
+    sfx.place(id); player.swing = 1;
+    if (!creative) inv.consumeHeld();
   };
 
   const interact = (dt: number) => {
-    actionCooldown -= dt; placeCooldown -= dt; digSoundTimer -= dt;
+    breakCd -= dt; useCd -= dt; attackCd -= dt;
     const d = lookDir();
     const ex = player.x, ey = player.y + EYE, ez = player.z;
-    target = raycast(world, ex, ey, ez, d[0], d[1], d[2], REACH);
-    const mobHit = entities.pick(ex, ey, ez, d[0], d[1], d[2], Math.min(3.6, target ? target.dist : 99));
+    const reach = creative ? 6 : 4.5;
+    const hit = raycast(world, ex, ey, ez, d[0], d[1], d[2], reach);
+    const mobHit = entities.pick(ex, ey, ez, d[0], d[1], d[2], Math.min(3.6, hit ? hit.dist : reach));
+    target = mobHit ? null : hit;
+    const held = inv.held, tool = held ? ITEMS.get(held.id)?.tool : undefined;
 
-    // Attack
-    if (input.clicked[0] && mobHit) {
-      player.swing = 1;
-      mobHit.mob.damage(creative ? 100 : 4, d[0], d[2], entities);
+    // Left button: attack or mine
+    const m = mining;
+    m.active = false;
+    if (mobHit && input.clicked[0] && attackCd <= 0) {
+      attackCd = 0.3; player.swing = 1;
+      const hl = Math.hypot(d[0], d[2]) || 1;
+      mobHit.mob.damage(creative ? 30 : tool ? tool.damage : 1, d[0] / hl, d[2] / hl, entities);
       sfx.hit();
-      breaking = null;
-      return;
+      if (tool && !creative && inv.damageHeld()) sfx.toolBreak();
+    } else if (input.buttons[0] && target && breakCd <= 0) {
+      const t = target;
+      if (m.x !== t.x || m.y !== t.y || m.z !== t.z) { m.x = t.x; m.y = t.y; m.z = t.z; m.progress = 0; }
+      const bt = breakTime(t.block, held);
+      if (bt !== Infinity) {
+        m.active = true;
+        m.progress += bt === 0 ? 1 : dt / bt;
+        m.soundT -= dt;
+        if (player.swing <= 0.2) player.swing = 1;
+        if (m.soundT <= 0 && bt > 0) { m.soundT = 0.22; sfx.dig(t.block); entities.blockBurst(t.x, t.y, t.z, t.block, 2); }
+        if (m.progress >= 1) {
+          destroyBlock(t.x, t.y, t.z, !creative && canHarvest(t.block, held));
+          if (tool && !creative && BLOCKS[t.block].hard > 0 && inv.damageHeld()) sfx.toolBreak();
+          m.progress = 0; m.active = false;
+          breakCd = creative ? 0.18 : bt === 0 ? 0.12 : 0.05;
+        }
+      }
+    }
+    if (!m.active && !(input.buttons[0] && target)) m.progress = 0;
+
+    // Middle button: pick block (creative)
+    if (input.clicked[1] && target && creative) {
+      const id = target.block === B.FURNACE_LIT ? B.FURNACE : target.block;
+      const at = inv.slots.findIndex((s, i) => i < HOTBAR && s && s.id === id);
+      if (at >= 0) inv.selected = at; else inv.slots[inv.selected] = makeStack(id, 64);
+      nameTimer = 2;
     }
 
-    // Break
-    if (input.buttons[0] && target && !mobHit) {
-      if (creative) {
-        if (actionCooldown <= 0) { actionCooldown = 0.16; player.swing = 1; breakBlock(target); }
-        breaking = null;
-      } else {
-        if (!breaking || breaking.x !== target.x || breaking.y !== target.y || breaking.z !== target.z) breaking = { x: target.x, y: target.y, z: target.z, t: 0 };
-        breaking.t += dt;
-        if (player.swing <= 0.05) player.swing = 1;
-        if (digSoundTimer <= 0) { digSoundTimer = 0.22; sfx.dig(); if (Math.random() < 0.6) entities.blockBurst(target.x, target.y, target.z, target.block, 2); }
-        const hardness = BLOCKS[target.block].hardness;
-        if (breaking.t >= hardness) { breakBlock(target); breaking = null; }
-      }
-    } else breaking = null;
+    // Right button: use or place
+    if (input.buttons[2] && useCd <= 0) { useCd = 0.24; use(target, held); }
+  };
 
-    // Pick block
-    if (input.clicked[1] && target && creative) inv.slots[inv.selected] = { id: target.block, count: 64 };
-
-    // Place / use
-    if (input.buttons[2] && placeCooldown <= 0) {
-      const held = inv.held;
-      if (input.clicked[2] && target && target.block === B.TNT) {
-        placeCooldown = 0.25; player.swing = 1;
-        entities.prime(target.x, target.y, target.z);
-      } else if (held && held.id === Item.PORK) {
-        if (input.clicked[2] && player.health < 20) { player.health = Math.min(20, player.health + 6); inv.consumeSelected(); sfx.eat(); placeCooldown = 0.3; }
-      } else if (held && held.id < 100 && target) {
-        const px = target.x + target.nx, py = target.y + target.ny, pz = target.z + target.nz;
-        const there = world.getBlock(px, py, pz);
-        const solid = BLOCKS[held.id].solid;
-        if ((there === B.AIR || there === B.WATER) && py > 0 && py < 64 && !(solid && player.intersectsCell(px, py, pz))) {
-          world.setBlock(px, py, pz, held.id);
-          if (!creative) inv.consumeSelected();
-          sfx.place();
-          player.swing = 1;
-          placeCooldown = 0.2;
-        }
+  const tickFurnaces = (dt: number) => {
+    for (const f of furnaces.values()) {
+      const lit = tickFurnace(f, dt);
+      if (lit !== !!f.lit && world.isLoaded(f.x, f.z)) {
+        const cur = world.getBlock(f.x, f.y, f.z);
+        if (cur === B.FURNACE || cur === B.FURNACE_LIT) { world.setBlock(f.x, f.y, f.z, lit ? B.FURNACE_LIT : B.FURNACE); f.lit = lit; }
       }
     }
   };
@@ -250,26 +373,46 @@ async function boot() {
   // ------------------------------------------------------------------ camera
 
   const placeCamera = (dt: number) => {
-    const ex = player.x, ey = player.y + EYE, ez = player.z;
+    const ex = player.x, ey = player.y + EYE - (player.sneaking ? 0.12 : 0), ez = player.z;
     const bobY = Math.abs(Math.sin(player.walkPhase)) * 0.07 * player.bob;
-    const sprinting = Math.hypot(player.vx, player.vz) > 5.5;
-    cam.fov += ((sprinting ? 84 : 75) - cam.fov) * Math.min(1, dt * 8);
+    cam.fov += ((player.sprinting ? settings.fov + 9 : settings.fov) - cam.fov) * Math.min(1, dt * 8);
     shake = Math.max(0, shake - dt * 1.4);
     const sh = shake * shake;
     const jx = (Math.random() - 0.5) * sh * 0.8, jy = (Math.random() - 0.5) * sh * 0.8;
 
     if (cameraMode === 0) {
-      cam.x = ex + jx; cam.y = ey + (cameraMode === 0 ? bobY : 0) + jy; cam.z = ez;
+      cam.x = ex + jx; cam.y = ey + bobY + jy; cam.z = ez;
       cam.yaw = player.yaw; cam.pitch = player.pitch;
     } else {
       const front = cameraMode === 2;
       const yaw = player.yaw + (front ? Math.PI : 0), pitch = front ? -player.pitch : player.pitch;
       const fx = -Math.sin(yaw) * Math.cos(pitch), fy = Math.sin(pitch), fz = -Math.cos(yaw) * Math.cos(pitch);
-      const hit = raycast(world, ex, ey, ez, -fx, -fy, -fz, 4.5);
-      const dist = Math.max(0.4, (hit ? hit.dist : 4.5) - 0.3);
+      // Pull the camera in until nothing solid sits between it and the head.
+      let dist = 0;
+      for (; dist < 4.5; dist += 0.15) {
+        if (SOLID[world.getBlock(Math.floor(ex - fx * (dist + 0.3)), Math.floor(ey - fy * (dist + 0.3)), Math.floor(ez - fz * (dist + 0.3)))]) break;
+      }
       cam.x = ex - fx * dist + jx; cam.y = ey - fy * dist + jy; cam.z = ez - fz * dist;
       cam.yaw = yaw; cam.pitch = pitch;
     }
+  };
+
+  const heldView: HeldView = { block: 0, sprite: null, swing: 0, bobX: 0, bobY: 0, drop: 0, sky: 0, lamp: 0 };
+  const updateHeld = (dt: number) => {
+    const held = inv.held, id = held ? held.id : 0;
+    if (id !== heldId) { heldId = id; handDrop = 1; }
+    handDrop = Math.max(0, handDrop - dt * 5);
+    const hs = Math.min(1, Math.hypot(player.vx, player.vz) / 4.3) * (player.onGround ? 1 : 0.2);
+    heldView.block = id && isBlockId(id) && CUBE[id] ? id : 0;
+    heldView.sprite = id && !heldView.block ? texture(ITEMS.get(id)!.icon) : null;
+    heldView.swing = player.swing;
+    heldView.bobX = Math.sin(player.walkPhase) * 0.025 * hs;
+    heldView.bobY = -Math.abs(Math.cos(player.walkPhase)) * 0.03 * hs;
+    heldView.drop = handDrop;
+    const fx = Math.floor(player.x), fz = Math.floor(player.z);
+    const top = world.isLoaded(fx, fz) ? world.topAt(fx, fz) : 0;
+    heldView.sky = player.y + EYE >= top ? 0 : top - player.y <= 8 ? 1 : 2;
+    heldView.lamp = held && isBlockId(held.id) && BLOCKS[held.id].light ? 3 : heldView.sky === 2 ? 1 : 0;
   };
 
   // ------------------------------------------------------------------ frame
@@ -295,41 +438,48 @@ async function boot() {
 
     // --- global keys
     if (input.pressed.has('F3')) debug = !debug;
-    if (playing || state === 'inventory') {
-      if (input.pressed.has('KeyE')) {
-        if (state === 'inventory') { inv.stashCursor(); state = 'playing'; input.lock(); }
-        else { state = 'inventory'; input.unlock(); }
-        sfx.click();
-      } else if (input.pressed.has('Escape') && state === 'inventory') { inv.stashCursor(); state = 'playing'; input.lock(); }
-    }
-    if (playing) {
+    if (state === 'window') {
+      if (input.pressed.has('KeyE') || input.pressed.has('Escape')) closeWindow();
+    } else if (playing) {
+      if (input.pressed.has('KeyE')) openWindow('inventory');
+      if (input.pressed.has('KeyQ') && inv.held) { dropStack({ ...inv.held, count: 1 }); inv.consumeHeld(); }
       if (input.pressed.has('F5') || input.pressed.has('KeyV')) cameraMode = (cameraMode + 1) % 3;
       if (input.pressed.has('KeyM')) showMap = !showMap;
-      if (input.pressed.has('KeyT')) { dayTime = (dayTime + 0.125) % 1; say('Time skipped'); }
+      if (input.pressed.has('KeyT') && (creative || debug)) { dayTime = (dayTime + 0.125) % 1; say('Time skipped'); }
       if (input.pressed.has('KeyP') || (input.pressed.has('Escape') && !input.locked)) { state = 'paused'; pausedAt = clock; input.unlock(); writeSave(); }
-      for (let i = 0; i < HOTBAR; i++) if (input.pressed.has('Digit' + (i + 1))) inv.selected = i;
-      if (input.wheel) inv.selected = (inv.selected + Math.sign(input.wheel) + HOTBAR) % HOTBAR;
-      if (input.clicked[0] && !input.locked) input.lock();
+      for (let i = 0; i < HOTBAR; i++) if (input.pressed.has('Digit' + (i + 1))) { inv.selected = i; nameTimer = 2; }
+      if (input.wheel) { inv.selected = (inv.selected + Math.sign(input.wheel) + HOTBAR) % HOTBAR; nameTimer = 2; }
+      if (input.clicked[0] && !input.locked && !params.has('autoplay')) { input.lock(); input.clicked[0] = false; }
     }
 
     // --- simulation
     if (state === 'loading') {
-      const pending = world.stream(player.x, player.z, 40, 12);
-      loadingTotal++;
-      if (!pending) { state = 'playing'; input.lock(); say(creative ? 'Creative mode: double tap Space to fly' : 'Survival mode: gather, craft, find gems'); }
+      const pending = world.stream(player.x, player.z, 44, 14);
+      loadFrames++;
+      if (!pending) {
+        if (!readSave() || player.y < 1) player.spawnAt(world, Math.floor(player.x), Math.floor(player.z));
+        state = 'playing'; input.lock();
+        say(creative ? 'Creative mode: double tap Space to fly' : 'Survival: punch a tree, craft tools, survive the night');
+      }
     } else if (state === 'title') {
       world.stream(titleCenter[0], titleCenter[1], r3d.renderDistance, 6);
     } else {
       world.stream(player.x, player.z, r3d.renderDistance, 5);
     }
 
-    if (playing || state === 'inventory' || state === 'dead') {
+    const sim = playing || state === 'window' || state === 'dead';
+    if (sim) {
       dayTime = (dayTime + dt / DAY_LENGTH) % 1;
-      if (playing && input.locked) player.look(input, 0.0024);
+      if (playing && input.locked) player.look(input, settings.sens * 0.00024);
       player.update(world, input, dt, clock, playing);
-      if (playing) interact(dt); else breaking = null;
+      if (playing) interact(dt); else { mining.active = false; target = null; }
       entities.update(dt, player, env.night);
-      if (player.dead && state !== 'dead') { state = 'dead'; input.unlock(); cameraMode = 1; }
+      world.tick(dt);
+      tickFurnaces(dt);
+      if (player.dead && state !== 'dead') {
+        if (state === 'window') win.close(inv, dropStack);
+        state = 'dead'; input.unlock(); cameraMode = 1;
+      }
       saveTimer += dt;
       if (saveTimer > 15) { saveTimer = 0; writeSave(); }
     }
@@ -339,8 +489,9 @@ async function boot() {
       const a = clock * 0.06;
       const cx = titleCenter[0], cz = titleCenter[1];
       cam.x = cx + Math.cos(a) * 26; cam.z = cz + Math.sin(a) * 26;
-      const ground = world.hasChunk(Math.floor(cam.x) >> 4, Math.floor(cam.z) >> 4) ? world.topAt(Math.floor(cam.x), Math.floor(cam.z)) : 30;
-      const wantY = Math.max(ground, world.hasChunk(Math.floor(cx) >> 4, Math.floor(cz) >> 4) ? world.topAt(Math.floor(cx), Math.floor(cz)) : 30) + 14;
+      const ground = world.isLoaded(cam.x, cam.z) ? world.surfaceY(Math.floor(cam.x), Math.floor(cam.z)) : SEA + 8;
+      const center = world.isLoaded(cx, cz) ? world.surfaceY(Math.floor(cx), Math.floor(cz)) : SEA + 8;
+      const wantY = Math.max(ground, center, SEA) + 14;
       cam.y += (wantY - cam.y) * Math.min(1, dt * 1.5);
       cam.yaw = Math.atan2(cam.x - cx, cam.z - cz); cam.pitch = -0.38; cam.fov = 75;
       dayTime = (dayTime + dt / 120) % 1;
@@ -350,69 +501,78 @@ async function boot() {
 
     // --- 3D scene
     if (state !== 'loading') {
-      r3d.begin(cam);
+      r3d.begin(cam, clock);
       r3d.drawSky(env);
       r3d.drawWorld(world);
       entities.draw(r3d, clock);
-      if (cameraMode !== 0 && state !== 'title') {
-        const amp = Math.min(0.9, Math.hypot(player.vx, player.vz) * 0.2) * (player.onGround ? 1 : 0.4);
-        entities.drawModel(r3d, MODELS.avatar, player.x, player.y, player.z, player.yaw, player.walkPhase, amp, player.pitch, 0, player.hurtTimer, Math.sin(player.swing * Math.PI) * 1.4);
+      if (state !== 'title') {
+        if (cameraMode !== 0) {
+          const amp = Math.min(0.9, Math.hypot(player.vx, player.vz) * 0.2) * (player.onGround ? 1 : 0.4);
+          entities.drawModel(r3d, MODELS.avatar, player.x, player.y, player.z, player.yaw, player.walkPhase, amp, player.pitch, 0, player.hurtTimer, Math.sin(player.swing * Math.PI) * 1.4);
+        } else if (!player.dead) { updateHeld(dt); r3d.drawHeld(heldView); }
       }
+      if (playing && mining.active && mining.progress > 0.02) r3d.drawCrack(mining.x, mining.y, mining.z, mining.progress);
       r3d.end(env);
-      if (playing && target) r3d.drawSelection(target.x, target.y, target.z, breaking ? clamp(breaking.t / BLOCKS[target.block].hardness, 0, 1) : 0);
+      if (playing && target) r3d.drawSelection(target.x, target.y, target.z);
       else r3d.clearSelection();
     }
 
     // --- HUD and menus
     toastTimer = Math.max(0, toastTimer - dt);
-    const info: HudInfo = {
-      fps, debug, gems, toast, toastAlpha: Math.min(1, toastTimer), renderer: rendererName, thirdPerson: cameraMode !== 0, timeOfDay: dayTime,
-      breakProgress: breaking && target ? clamp(breaking.t / BLOCKS[target.block].hardness, 0, 1) : 0,
-      debugLines: debug ? [
-        `ThorCraft | ${rendererName.toUpperCase()} | ${fps.toFixed(0)} fps (${frameAvg.toFixed(1)} ms)`,
+    nameTimer = Math.max(0, nameTimer - dt);
+    const inGame = state === 'playing' || state === 'window' || state === 'paused' || state === 'dead';
+    let debugLines: string[] = [];
+    if (debug && inGame) {
+      const t = world.terrain(Math.floor(player.x), Math.floor(player.z), { h: 0, biome: 0, temp: 0, hum: 0 });
+      debugLines = [
+        `ThorCraft | ${rendererName.toUpperCase()} | ${fps.toFixed(0)} fps (${frameAvg.toFixed(1)} ms) [${creative ? 'creative' : 'survival'}]`,
         `polys ${r3d.stats.polys}  shapes ${r3d.stats.shapes}  chunks ${r3d.stats.chunks}`,
-        `collect ${r3d.stats.collectMs.toFixed(1)} ms  emit ${r3d.stats.emitMs.toFixed(1)} ms`,
-        `xyz ${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}  view ${r3d.renderDistance}`,
+        `collect ${r3d.stats.collectMs.toFixed(1)} ms  emit ${r3d.stats.emitMs.toFixed(1)} ms  detail ${r3d.detail.toFixed(2)}`,
+        `xyz ${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}  view ${r3d.renderDistance}  biome ${BIOME_NAMES[t.biome]}`,
         `mobs ${entities.mobs.length}  drops ${entities.drops.length}  particles ${entities.particles.length}`,
-        `canvas ${W}x${H} @${canvas.dpr.toFixed(2)}  seed ${world.seed}`,
-      ] : [],
+        `canvas ${W}x${H} @${canvas.dpr.toFixed(2)}  seed ${seedText}`,
+        target ? `target ${BLOCKS[target.block].name} (${target.x}, ${target.y}, ${target.z})` : '',
+      ];
+    }
+    const info: HudInfo = {
+      fps, debug: debug && inGame, debugLines, gems, toast, toastAlpha: Math.min(1, toastTimer), nameAlpha: Math.min(1, nameTimer * 2),
+      timeOfDay: dayTime, inLava: player.inLava,
     };
 
-    const inGame = state === 'playing' || state === 'inventory' || state === 'paused' || state === 'dead';
     hud.setMinimapVisible(inGame && showMap);
     if (inGame) {
       hud.drawGame(player, inv, info, clock);
       if (showMap) hud.drawMinimap(world, player, dt);
     }
     if (state === 'title') {
-      const act = hud.drawTitle(!!readSave(), creative, rendererName, clock);
+      const act = hud.drawTitle(!!readSave(), rendererName, clock);
       if (act) { sfx.unlock(); sfx.click(); }
-      if (act === 'play') startWorld(readSave());
-      else if (act === 'new') { localStorage.removeItem(SAVE_KEY); startWorld(null); }
-      else if (act === 'mode') creative = !creative;
-      else if (act === 'renderer') {
+      if (act === 'continue') startWorld(readSave());
+      else if (act === 'survival' || act === 'creative') {
+        if (!readSave() || confirm('This overwrites the existing world. Continue?')) { localStorage.removeItem(SAVE_KEY); startWorld(null, act === 'creative', hud.seedText.trim()); }
+      } else if (act === 'renderer') {
         const next = rendererName === 'gl' ? 'wg' : rendererName === 'wg' ? 'sw' : 'gl';
         const u = new URL(location.href); u.searchParams.set('renderer', next); location.href = u.toString();
       }
     } else if (state === 'loading') {
-      hud.drawLoading(clamp(loadingTotal / 40, 0, 0.98));
+      hud.drawLoading(clamp(loadFrames / 60, 0, 0.98));
     } else if (state === 'paused') {
-      const act = hud.drawPause(r3d.renderDistance, autoQuality);
-      if (act) sfx.click();
+      const act = hud.drawPause(settings, creative);
+      if (act && act !== 'settings') sfx.click();
       if (act === 'resume') { state = 'playing'; input.lock(); }
-      else if (act === 'dist-') { autoQuality = false; r3d.renderDistance = Math.max(16, r3d.renderDistance - 8); }
-      else if (act === 'dist+') { autoQuality = false; r3d.renderDistance = Math.min(96, r3d.renderDistance + 8); }
-      else if (act === 'auto') autoQuality = !autoQuality;
+      else if (act === 'settings') { sfx.volume = settings.vol / 10; if (!fixedDist) r3d.renderDistance = settings.renderDist * 16; saveSettings(); }
+      else if (act === 'auto') { settings.auto = !settings.auto; saveSettings(); }
+      else if (act === 'mode') { creative = !creative; player.creative = creative; if (!creative) player.flying = false; }
       else if (act === 'quit') { writeSave(); location.reload(); }
       // Ignore the very Escape press that released the pointer lock.
       if (clock - pausedAt > 0.3 && (input.pressed.has('Escape') || input.pressed.has('KeyP'))) { state = 'playing'; input.lock(); }
-    } else if (state === 'inventory') {
-      if (hud.drawInventory(inv, creative)) sfx.click();
+    } else if (state === 'window') {
+      if (hud.drawWindow(winKind, inv, win, creative, openFurnace)) sfx.click();
     } else if (state === 'dead') {
       if (hud.drawDead(gems) === 'respawn') {
-        if (!creative) for (const s of inv.slots) if (s) entities.drop(s.id, s.count, player.x, player.y + 1, player.z);
+        if (!creative) for (const s of inv.slots) if (s) entities.drop(s.id, s.count, player.x, player.y + 1, player.z, s.dur);
         if (!creative) inv.slots.fill(null);
-        player.spawnAt(world, 8, 8);
+        player.spawnAt(world, spawn[0], spawn[1]);
         cameraMode = 0;
         state = 'playing'; input.lock();
       }
@@ -420,13 +580,14 @@ async function boot() {
     el.style.cursor = input.locked ? 'none' : hud.hot ? 'pointer' : 'default';
     hud.end();
 
-    // --- adaptive view distance
-    if (autoQuality && playing) {
+    // --- adaptive quality: texture detail first, then view distance
+    if (settings.auto && playing && !fixedDist) {
       qualityTimer += dt;
       if (qualityTimer > 1.5) {
         qualityTimer = 0;
-        if (frameAvg > 22 && r3d.renderDistance > 24) r3d.renderDistance -= 4;
-        else if (frameAvg < 14 && r3d.renderDistance < maxDistance) r3d.renderDistance += 2;
+        const maxDist = settings.renderDist * 16;
+        if (frameAvg > 24) { if (r3d.detail > 0.55) r3d.detail -= 0.15; else if (r3d.renderDistance > 32) r3d.renderDistance -= 4; }
+        else if (frameAvg < 17.5) { if (r3d.renderDistance < maxDist) r3d.renderDistance += 2; else if (r3d.detail < 1) r3d.detail = Math.min(1, r3d.detail + 0.05); }
       }
     }
 
@@ -436,19 +597,20 @@ async function boot() {
   };
 
   input.onLockChange = (locked) => {
-    if (!locked && state === 'playing') { state = 'paused'; pausedAt = clock; writeSave(); }
+    if (!locked && state === 'playing' && !params.has('autoplay')) { state = 'paused'; pausedAt = clock; writeSave(); }
   };
-  document.addEventListener('visibilitychange', () => { if (document.hidden && state !== 'title') writeSave(); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) writeSave(); });
+  window.addEventListener('beforeunload', () => writeSave());
   el.addEventListener('mousedown', () => sfx.unlock());
 
-  if (params.has('autoplay')) { creative = params.get('autoplay') === 'creative'; startWorld(params.has('fresh') ? null : readSave()); }
-  if (params.has('max')) maxDistance = Number(params.get('max')) || 64;
+  if (params.has('autoplay')) startWorld(params.has('fresh') ? null : readSave(), params.get('autoplay') === 'creative');
 
   (window as any).__game = {
-    get state() { return state; }, player, inv, r3d, cam, get world() { return world; }, get entities() { return entities; },
-    setTime: (t: number) => { dayTime = t; }, setState: (s: State) => { state = s; },
+    get state() { return state; }, player, get inv() { return inv; }, r3d, cam, settings, input, get world() { return world; }, get entities() { return entities; },
+    setTime: (t: number) => { dayTime = t; }, setState: (s: State) => { state = s; }, open: (k: WindowKind) => openWindow(k),
+    give: (id: number, n = 1) => inv.add(id, n), win, furnaces: () => furnaces,
     spawn: (kind: MobKind, dx: number, dz: number) => { const x = Math.floor(player.x + dx), z = Math.floor(player.z + dz); entities.mobs.push(new Mob(kind, x + 0.5, world.surfaceY(x, z), z + 0.5)); },
- setCamera: (m: number) => { cameraMode = m; }, stats: () => ({ fps, frameAvg, ...r3d.stats }),
+    setCamera: (m: number) => { cameraMode = m; }, stats: () => ({ fps, frameAvg, ...r3d.stats }),
   };
   requestAnimationFrame(frame);
 }

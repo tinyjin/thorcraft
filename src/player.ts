@@ -7,7 +7,7 @@ import { World } from './world';
 import { clamp } from './math';
 
 export const EYE = 1.62;
-const WALK = 4.4, SPRINT = 6.6, FLY = 11, JUMP = 8.4, GRAVITY = 27;
+const WALK = 4.4, SPRINT = 6.2, SNEAK = 1.6, FLY = 11, JUMP = 8.4, GRAVITY = 27;
 
 export class Player implements Body {
   x = 0; y = 40; z = 0; vx = 0; vy = 0; vz = 0;
@@ -24,6 +24,16 @@ export class Player implements Body {
   bob = 0;
   swing = 0; // arm swing on click, 1 -> 0
   headInWater = false;
+  inLava = false;
+  sneaking = false;
+  sprinting = false;
+  /** Set by a double tap on W, cleared when forward is released. */
+  sprintLatch = false;
+  /** Block id under the feet, for footstep sounds. */
+  groundBlock = 0;
+  private sinceHurt = 99;
+  private regenTimer = 0;
+  private lastW = -1;
   private stepAcc = 0;
   private cactusTimer = 0;
   private drownTimer = 0;
@@ -44,6 +54,7 @@ export class Player implements Body {
     this.health = Math.max(0, this.health - amount);
     this.hurtTimer = 0.35;
     this.invuln = 0.5;
+    this.sinceHurt = 0;
     this.onHurt?.(amount);
     if (this.health <= 0) this.dead = true;
   }
@@ -65,11 +76,15 @@ export class Player implements Body {
         else this.lastSpace = now;
       }
       if (this.creative && input.pressed.has('KeyF')) { this.flying = !this.flying; this.vy = 0; }
+      if (input.pressed.has('KeyW')) { if (now - this.lastW < 0.28) this.sprintLatch = true; this.lastW = now; }
     }
+    if (mz <= 0) this.sprintLatch = false;
     if (!this.creative) this.flying = false;
     const len = Math.hypot(mx, mz) || 1;
     mx /= len; mz /= len;
-    const sprint = controllable && (input.keys.has('ShiftLeft') || input.keys.has('ControlLeft'));
+    const sneak = controllable && input.keys.has('ShiftLeft') && !this.flying;
+    const sprint = controllable && (input.keys.has('ControlLeft') || this.sprintLatch) && mz > 0 && !sneak;
+    this.sneaking = sneak; this.sprinting = sprint;
     const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
     // forward = (-sin, -cos), right = (cos, -sin)
     const wx = -sin * mz + cos * mx, wz = -cos * mz - sin * mx;
@@ -80,19 +95,29 @@ export class Player implements Body {
       const k = 1 - Math.pow(0.0005, dt);
       let up = 0;
       if (controllable && input.keys.has('Space')) up += 1;
-      if (controllable && (input.keys.has('KeyC') || input.keys.has('KeyQ'))) up -= 1;
+      if (controllable && (input.keys.has('KeyC') || input.keys.has('ShiftLeft'))) up -= 1;
       this.vx += (wx * sp - this.vx) * k; this.vz += (wz * sp - this.vz) * k; this.vy += (up * sp * 0.8 - this.vy) * k;
       stepBody(world, this, dt, 0);
       if (this.onGround) this.flying = false;
     } else {
-      const sp = (sprint ? SPRINT : WALK) * (this.inWater ? 0.6 : 1);
+      const sp = (sprint ? SPRINT : sneak ? SNEAK : WALK) * (this.inWater ? 0.6 : 1) * (this.inLava ? 0.4 : 1);
       const k = 1 - Math.pow(this.onGround ? 0.00002 : 0.02, dt);
       this.vx += (wx * sp - this.vx) * k; this.vz += (wz * sp - this.vz) * k;
       if (controllable && input.keys.has('Space')) {
         if (this.inWater) this.vy = Math.min(this.vy + 30 * dt, 3.6);
         else if (this.onGround) this.vy = JUMP;
       }
+      // Sneaking keeps the player from walking off an edge.
+      const sx = this.x, sz = this.z, wasGround = this.onGround;
       const fallSpeed = stepBody(world, this, dt, GRAVITY);
+      if (sneak && wasGround && this.vy <= 0 && !this.inWater) {
+        const under = (x: number, z: number) => this.supported(world, x, z);
+        if (!under(this.x, this.z)) {
+          if (under(sx, this.z)) { this.x = sx; this.vx = 0; }
+          else if (under(this.x, sz)) { this.z = sz; this.vz = 0; }
+          else { this.x = sx; this.z = sz; this.vx = this.vz = 0; }
+        }
+      }
       // Hop out of water onto a ledge.
       if (this.inWater && this.hitWall && controllable && input.keys.has('Space')) this.vy = Math.max(this.vy, 5.4);
       if (fallSpeed > 13.5 && !this.inWater) this.damage(Math.floor((fallSpeed - 12) * 0.9), true);
@@ -112,6 +137,13 @@ export class Player implements Body {
     // Environment hazards
     const head = world.getBlock(Math.floor(this.x), Math.floor(this.y + EYE), Math.floor(this.z));
     this.headInWater = head === B.WATER;
+    const feet = world.getBlock(Math.floor(this.x), Math.floor(this.y + 0.2), Math.floor(this.z));
+    this.inLava = feet === B.LAVA || head === B.LAVA;
+    if (this.inLava) this.damage(4);
+    this.groundBlock = world.getBlock(Math.floor(this.x), Math.floor(this.y - 0.5), Math.floor(this.z));
+    // Slow natural regeneration when left alone for a while.
+    this.sinceHurt += dt;
+    if (this.sinceHurt > 6 && this.health < 20) { this.regenTimer += dt; if (this.regenTimer > 3) { this.regenTimer = 0; this.health = Math.min(20, this.health + 1); } }
     if (this.headInWater && !this.creative) {
       this.air = Math.max(0, this.air - dt);
       if (this.air <= 0) { this.drownTimer += dt; if (this.drownTimer > 1) { this.drownTimer = 0; this.damage(2, true); } }
@@ -120,6 +152,13 @@ export class Player implements Body {
     this.cactusTimer -= dt;
     if (this.cactusTimer <= 0 && this.touches(world, B.CACTUS)) { this.cactusTimer = 0.6; this.damage(1, true); }
     if (this.y < -20) this.damage(4, true);
+  }
+
+  /** Is there solid ground right below a body centered at (x, z)? */
+  private supported(world: World, x: number, z: number): boolean {
+    const y = Math.floor(this.y - 0.1), m = this.hw - 0.05;
+    for (const dx of [-m, m]) for (const dz of [-m, m]) if (BLOCKS[world.getBlock(Math.floor(x + dx), y, Math.floor(z + dz))].solid) return true;
+    return false;
   }
 
   private touches(world: World, id: number): boolean {
@@ -145,7 +184,7 @@ export class Player implements Body {
         const tx = Math.floor(x + Math.cos(a * 0.785) * r), tz = Math.floor(z + Math.sin(a * 0.785) * r);
         const sy = world.surfaceY(tx, tz);
         const ground = world.getBlock(tx, sy - 1, tz);
-        if (BLOCKS[ground].solid && world.getBlock(tx, sy, tz) === B.AIR && ground !== B.CACTUS && ground !== B.LEAVES) { bx = tx; bz = tz; found = true; }
+        if (BLOCKS[ground].solid && world.getBlock(tx, sy, tz) === B.AIR && ground !== B.CACTUS && ground !== B.LEAVES && ground !== B.BIRCH_LEAVES && ground !== B.SPRUCE_LEAVES) { bx = tx; bz = tz; found = true; }
       }
       if (found) break;
     }

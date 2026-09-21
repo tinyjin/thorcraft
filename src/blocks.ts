@@ -1,105 +1,175 @@
-// Block registry, baked color palette and vector "textures" (decals).
+// Block and item registry, plus the color palette the renderer batches by.
 
 export const enum B {
-  AIR = 0, GRASS, DIRT, STONE, SAND, WATER, LOG, LEAVES, PLANKS, COBBLE, BRICK, GLASS, SNOW,
-  COAL_ORE, GOLD_ORE, DIAMOND_ORE, BEDROCK, TNT, LAMP, CACTUS, SANDSTONE, BIRCH_LOG, BIRCH_LEAVES,
-  WOOL_RED, WOOL_BLUE, WOOL_YELLOW, WOOL_WHITE, ICE,
+  AIR = 0, STONE, GRASS, DIRT, COBBLE, PLANKS, SAND, GRAVEL, LOG, LEAVES, GLASS, WATER, BEDROCK,
+  COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE, SNOWGRASS, SNOW, ICE, CACTUS, BIRCH_LOG, BIRCH_LEAVES,
+  SPRUCE_LOG, SPRUCE_LEAVES, SANDSTONE, BRICK, CRAFTING_TABLE, FURNACE, FURNACE_LIT, TORCH, TNT,
+  TALLGRASS, FLOWER_RED, FLOWER_YELLOW, GLOWSTONE, LAVA, OBSIDIAN,
+  WOOL_WHITE, WOOL_RED, WOOL_BLUE, WOOL_GREEN, WOOL_YELLOW, WOOL_BLACK,
+  BOOKSHELF, IRON_BLOCK, GOLD_BLOCK, DIAMOND_BLOCK, STONE_BRICKS, DEADBUSH, BIRCH_PLANKS, SPRUCE_PLANKS,
   COUNT,
 }
 
-/** Non-block inventory items live above the block id range. */
-export const enum Item {
-  PORK = 100, GEM = 101,
+/** Non-block items live above the block id range. */
+export const ITEM_BASE = 256;
+export const enum I {
+  STICK = 256, COAL, IRON_INGOT, GOLD_INGOT, DIAMOND,
+  // 16 tools follow: material (wood, stone, iron, diamond) x type (pickaxe, axe, shovel, sword)
+  TOOL0 = 261,
+  PORK_RAW = 277, PORK_COOKED, BEEF_RAW, BEEF_COOKED, APPLE, GUNPOWDER, ROTTEN_FLESH,
 }
 
+export type ToolType = 'pickaxe' | 'axe' | 'shovel' | 'sword';
+export type Render = 'none' | 'cube' | 'cross' | 'torch' | 'liquid';
+export type SoundKind = 'stone' | 'wood' | 'dirt' | 'grass' | 'sand' | 'glass' | 'cloth';
 type RGB = readonly [number, number, number];
 
-/** A decal is a rectangle in face UV space (v = 0 is the top edge on side faces). */
-interface DecalDef { rect: readonly [number, number, number, number]; color: RGB }
+export interface ToolDef { type: ToolType; tier: number; dur: number; damage: number; mat: string }
 
-interface BlockDef {
-  name: string;
-  top: RGB; side: RGB; bottom: RGB;
-  alpha?: number;
-  /** Opaque blocks hide the faces of their neighbors. */
-  opaque?: boolean;
-  solid?: boolean;
-  liquid?: boolean;
-  emissive?: boolean;
-  /** Seconds to break by hand in survival. */
-  hardness: number;
-  /** What the block drops (defaults to itself). 0 drops nothing. */
-  drop?: number;
-  decalsTop?: DecalDef[]; decalsSide?: DecalDef[];
+export interface ItemDef {
+  id: number; name: string; isBlock: boolean; stack: number;
+  tool?: ToolDef; food: number; fuel: number; hidden: boolean;
+  /** Texture name used for the flat icon (items and cross shaped blocks). */
+  icon: string;
 }
 
-const d = (u0: number, v0: number, u1: number, v1: number, color: RGB): DecalDef => ({ rect: [u0, v0, u1, v1], color });
-
-const oreSpecks = (c: RGB): DecalDef[] => [
-  d(0.12, 0.15, 0.34, 0.3, c), d(0.58, 0.1, 0.8, 0.26, c), d(0.3, 0.5, 0.52, 0.66, c), d(0.68, 0.62, 0.88, 0.8, c), d(0.1, 0.74, 0.28, 0.88, c),
-];
-const stoneCracks: DecalDef[] = [d(0.1, 0.3, 0.5, 0.36, [108, 108, 112]), d(0.55, 0.62, 0.92, 0.68, [108, 108, 112]), d(0.2, 0.8, 0.45, 0.85, [140, 140, 146])];
-const plankLines: DecalDef[] = [d(0, 0.23, 1, 0.27, [120, 88, 48]), d(0, 0.48, 1, 0.52, [120, 88, 48]), d(0, 0.73, 1, 0.77, [120, 88, 48]), d(0.3, 0, 0.34, 0.25, [120, 88, 48]), d(0.7, 0.5, 0.74, 0.75, [120, 88, 48])];
-const brickLines: DecalDef[] = [
-  d(0, 0.22, 1, 0.28, [196, 186, 172]), d(0, 0.47, 1, 0.53, [196, 186, 172]), d(0, 0.72, 1, 0.78, [196, 186, 172]),
-  d(0.47, 0, 0.53, 0.25, [196, 186, 172]), d(0.22, 0.25, 0.28, 0.5, [196, 186, 172]), d(0.72, 0.25, 0.78, 0.5, [196, 186, 172]),
-  d(0.47, 0.5, 0.53, 0.75, [196, 186, 172]), d(0.22, 0.75, 0.28, 1, [196, 186, 172]), d(0.72, 0.75, 0.78, 1, [196, 186, 172]),
-];
-const barkLines = (c: RGB): DecalDef[] => [d(0.18, 0, 0.26, 1, c), d(0.48, 0, 0.54, 1, c), d(0.76, 0, 0.84, 1, c)];
-const rings = (a: RGB, b: RGB): DecalDef[] => [d(0.15, 0.15, 0.85, 0.85, a), d(0.3, 0.3, 0.7, 0.7, b), d(0.42, 0.42, 0.58, 0.58, a)];
-const leafDots = (c: RGB, c2: RGB): DecalDef[] => [d(0.1, 0.1, 0.35, 0.35, c), d(0.55, 0.2, 0.85, 0.45, c2), d(0.25, 0.55, 0.5, 0.85, c2), d(0.65, 0.65, 0.9, 0.9, c)];
+export interface BlockDef extends ItemDef {
+  render: Render;
+  /** Texture names per face direction (+X, -X, +Y, -Y, +Z, -Z). */
+  faces: string[];
+  solid: boolean; opaque: boolean; alpha: number; liquid: boolean;
+  /** 0..3, how strongly the block lights its surroundings. */
+  light: number;
+  /** Seconds-ish to break by hand; negative means unbreakable. */
+  hard: number;
+  mine: ToolType | null; tier: number;
+  /** Item id dropped when harvested, 0 for nothing. */
+  drop: number;
+  gravity: boolean; replaceable: boolean; sound: SoundKind;
+}
 
 export const BLOCKS: BlockDef[] = [];
-const def = (id: number, b: BlockDef) => { BLOCKS[id] = { opaque: true, solid: true, ...b }; };
+export const ITEMS = new Map<number, ItemDef>();
 
-def(B.AIR, { name: 'Air', top: [0, 0, 0], side: [0, 0, 0], bottom: [0, 0, 0], opaque: false, solid: false, hardness: 0 });
-def(B.GRASS, { name: 'Grass', top: [106, 170, 64], side: [134, 96, 67], bottom: [134, 96, 67], hardness: 0.6, drop: B.DIRT,
-  decalsSide: [d(0, 0, 1, 0.22, [106, 170, 64]), d(0.1, 0.22, 0.25, 0.34, [106, 170, 64]), d(0.5, 0.22, 0.7, 0.3, [106, 170, 64]), d(0.82, 0.22, 0.95, 0.38, [106, 170, 64])],
-  decalsTop: [d(0.15, 0.2, 0.3, 0.35, [122, 186, 76]), d(0.6, 0.55, 0.78, 0.72, [92, 154, 54]), d(0.7, 0.12, 0.82, 0.24, [122, 186, 76])] });
-def(B.DIRT, { name: 'Dirt', top: [134, 96, 67], side: [134, 96, 67], bottom: [134, 96, 67], hardness: 0.5,
-  decalsSide: [d(0.2, 0.3, 0.36, 0.42, [112, 78, 52]), d(0.62, 0.64, 0.8, 0.76, [150, 110, 78])] });
-def(B.STONE, { name: 'Stone', top: [128, 128, 132], side: [128, 128, 132], bottom: [128, 128, 132], hardness: 1.5, drop: B.COBBLE, decalsSide: stoneCracks, decalsTop: stoneCracks });
-def(B.SAND, { name: 'Sand', top: [222, 208, 156], side: [222, 208, 156], bottom: [222, 208, 156], hardness: 0.5,
-  decalsTop: [d(0.2, 0.25, 0.3, 0.33, [200, 186, 134]), d(0.66, 0.6, 0.78, 0.7, [236, 224, 176])] });
-def(B.WATER, { name: 'Water', top: [52, 110, 220], side: [44, 96, 200], bottom: [44, 96, 200], alpha: 150, opaque: false, solid: false, liquid: true, hardness: 0 });
-def(B.LOG, { name: 'Oak Log', top: [176, 142, 88], side: [104, 80, 48], bottom: [176, 142, 88], hardness: 1.2, decalsSide: barkLines([84, 62, 36]), decalsTop: rings([148, 116, 68], [176, 142, 88]) });
-def(B.LEAVES, { name: 'Leaves', top: [60, 134, 48], side: [54, 124, 44], bottom: [46, 108, 38], hardness: 0.2, decalsSide: leafDots([76, 156, 60], [42, 104, 36]), decalsTop: leafDots([76, 156, 60], [42, 104, 36]) });
-def(B.PLANKS, { name: 'Planks', top: [170, 132, 78], side: [170, 132, 78], bottom: [170, 132, 78], hardness: 1.0, decalsSide: plankLines, decalsTop: plankLines });
-def(B.COBBLE, { name: 'Cobblestone', top: [112, 112, 116], side: [112, 112, 116], bottom: [112, 112, 116], hardness: 1.8,
-  decalsSide: [d(0.06, 0.08, 0.42, 0.4, [136, 136, 140]), d(0.54, 0.12, 0.92, 0.46, [96, 96, 100]), d(0.14, 0.54, 0.5, 0.9, [96, 96, 100]), d(0.6, 0.58, 0.9, 0.88, [136, 136, 140])],
-  decalsTop: [d(0.06, 0.08, 0.42, 0.4, [136, 136, 140]), d(0.54, 0.12, 0.92, 0.46, [96, 96, 100]), d(0.14, 0.54, 0.5, 0.9, [96, 96, 100]), d(0.6, 0.58, 0.9, 0.88, [136, 136, 140])] });
-def(B.BRICK, { name: 'Bricks', top: [160, 78, 62], side: [160, 78, 62], bottom: [160, 78, 62], hardness: 2.0, decalsSide: brickLines, decalsTop: brickLines });
-def(B.GLASS, { name: 'Glass', top: [200, 232, 244], side: [200, 232, 244], bottom: [200, 232, 244], alpha: 70, opaque: false, hardness: 0.3, drop: 0,
-  decalsSide: [d(0, 0, 1, 0.06, [235, 248, 252]), d(0, 0.94, 1, 1, [235, 248, 252]), d(0, 0, 0.06, 1, [235, 248, 252]), d(0.94, 0, 1, 1, [235, 248, 252])],
-  decalsTop: [d(0, 0, 1, 0.06, [235, 248, 252]), d(0, 0.94, 1, 1, [235, 248, 252]), d(0, 0, 0.06, 1, [235, 248, 252]), d(0.94, 0, 1, 1, [235, 248, 252])] });
-def(B.SNOW, { name: 'Snow', top: [242, 246, 250], side: [226, 232, 240], bottom: [226, 232, 240], hardness: 0.3 });
-def(B.COAL_ORE, { name: 'Coal Ore', top: [128, 128, 132], side: [128, 128, 132], bottom: [128, 128, 132], hardness: 2.2, decalsSide: oreSpecks([40, 40, 44]), decalsTop: oreSpecks([40, 40, 44]) });
-def(B.GOLD_ORE, { name: 'Gold Ore', top: [128, 128, 132], side: [128, 128, 132], bottom: [128, 128, 132], hardness: 2.6, decalsSide: oreSpecks([246, 208, 62]), decalsTop: oreSpecks([246, 208, 62]) });
-def(B.DIAMOND_ORE, { name: 'Diamond Ore', top: [128, 128, 132], side: [128, 128, 132], bottom: [128, 128, 132], hardness: 3.2, decalsSide: oreSpecks([92, 226, 232]), decalsTop: oreSpecks([92, 226, 232]) });
-def(B.BEDROCK, { name: 'Bedrock', top: [52, 52, 56], side: [52, 52, 56], bottom: [52, 52, 56], hardness: Infinity,
-  decalsSide: [d(0.1, 0.1, 0.4, 0.35, [30, 30, 34]), d(0.5, 0.5, 0.9, 0.85, [72, 72, 78])] });
-def(B.TNT, { name: 'TNT', top: [200, 60, 48], side: [200, 60, 48], bottom: [200, 60, 48], hardness: 0.1,
-  decalsSide: [d(0, 0.34, 1, 0.66, [240, 240, 236]), d(0.12, 0.42, 0.18, 0.58, [30, 30, 30]), d(0.18, 0.42, 0.3, 0.47, [30, 30, 30]), d(0.4, 0.42, 0.46, 0.58, [30, 30, 30]), d(0.54, 0.42, 0.6, 0.58, [30, 30, 30]), d(0.46, 0.42, 0.54, 0.47, [30, 30, 30]), d(0.7, 0.42, 0.88, 0.47, [30, 30, 30]), d(0.76, 0.42, 0.82, 0.58, [30, 30, 30])],
-  decalsTop: [d(0.38, 0.38, 0.62, 0.62, [60, 60, 60])] });
-def(B.LAMP, { name: 'Lamp', top: [255, 232, 150], side: [255, 222, 128], bottom: [255, 222, 128], emissive: true, hardness: 0.4,
-  decalsSide: [d(0.2, 0.2, 0.8, 0.8, [255, 250, 214])], decalsTop: [d(0.2, 0.2, 0.8, 0.8, [255, 250, 214])] });
-def(B.CACTUS, { name: 'Cactus', top: [64, 140, 58], side: [56, 126, 50], bottom: [56, 126, 50], hardness: 0.4, decalsSide: barkLines([40, 98, 38]) });
-def(B.SANDSTONE, { name: 'Sandstone', top: [214, 198, 146], side: [206, 190, 138], bottom: [206, 190, 138], hardness: 1.2,
-  decalsSide: [d(0, 0.16, 1, 0.22, [184, 168, 118]), d(0, 0.62, 1, 0.68, [184, 168, 118])] });
-def(B.BIRCH_LOG, { name: 'Birch Log', top: [200, 184, 134], side: [222, 222, 214], bottom: [200, 184, 134], hardness: 1.2,
-  decalsSide: [d(0.1, 0.12, 0.4, 0.18, [50, 50, 46]), d(0.6, 0.4, 0.95, 0.46, [50, 50, 46]), d(0.2, 0.7, 0.55, 0.76, [50, 50, 46])], decalsTop: rings([176, 160, 110], [200, 184, 134]) });
-def(B.BIRCH_LEAVES, { name: 'Birch Leaves', top: [128, 170, 72], side: [118, 160, 66], bottom: [104, 144, 58], hardness: 0.2, decalsSide: leafDots([150, 190, 90], [98, 138, 54]), decalsTop: leafDots([150, 190, 90], [98, 138, 54]) });
-def(B.WOOL_RED, { name: 'Red Wool', top: [200, 56, 56], side: [200, 56, 56], bottom: [200, 56, 56], hardness: 0.4 });
-def(B.WOOL_BLUE, { name: 'Blue Wool', top: [56, 96, 204], side: [56, 96, 204], bottom: [56, 96, 204], hardness: 0.4 });
-def(B.WOOL_YELLOW, { name: 'Yellow Wool', top: [240, 200, 56], side: [240, 200, 56], bottom: [240, 200, 56], hardness: 0.4 });
-def(B.WOOL_WHITE, { name: 'White Wool', top: [236, 236, 236], side: [236, 236, 236], bottom: [236, 236, 236], hardness: 0.4 });
-def(B.ICE, { name: 'Ice', top: [160, 200, 250], side: [150, 190, 244], bottom: [150, 190, 244], alpha: 190, opaque: false, hardness: 0.4, drop: 0 });
+interface BlockOpts {
+  render?: Render; solid?: boolean; opaque?: boolean; alpha?: number; light?: number; hard?: number; tool?: ToolType; tier?: number;
+  drop?: number; gravity?: boolean; replaceable?: boolean; sound?: SoundKind; fuel?: number; hidden?: boolean;
+}
 
-export const ITEM_NAMES: Record<number, string> = { [Item.PORK]: 'Pork Chop', [Item.GEM]: 'Gem' };
-export const itemName = (id: number) => (id < 100 ? BLOCKS[id]?.name ?? '?' : ITEM_NAMES[id] ?? '?');
+function block(id: number, name: string, tiles: string | [string, string, string, string?], o: BlockOpts = {}) {
+  const t = typeof tiles === 'string' ? { top: tiles, bottom: tiles, side: tiles, front: tiles } : { top: tiles[0], bottom: tiles[1], side: tiles[2], front: tiles[3] ?? tiles[2] };
+  const render = o.render ?? 'cube';
+  const opaque = o.opaque ?? render === 'cube';
+  const d: BlockDef = {
+    id, name, isBlock: true, stack: 64, food: 0, fuel: o.fuel ?? 0, hidden: !!o.hidden, icon: t.side,
+    render, faces: [t.side, t.side, t.top, t.bottom, t.side, t.front],
+    solid: o.solid ?? render === 'cube', opaque, alpha: o.alpha ?? 255, liquid: render === 'liquid',
+    light: o.light ?? 0, hard: o.hard ?? 1, mine: o.tool ?? null, tier: o.tier ?? 0,
+    drop: o.drop === undefined ? id : o.drop, gravity: !!o.gravity, replaceable: !!o.replaceable, sound: o.sound ?? 'stone',
+  };
+  BLOCKS[id] = d;
+  ITEMS.set(id, d);
+}
 
-export const isOpaque = (id: number) => BLOCKS[id].opaque === true;
-export const isSolid = (id: number) => BLOCKS[id].solid === true;
+const P: ToolType = 'pickaxe', A: ToolType = 'axe', S: ToolType = 'shovel';
+block(B.AIR, 'Air', 'stone', { render: 'none', solid: false, opaque: false, hard: 0, replaceable: true, hidden: true, drop: 0 });
+block(B.STONE, 'Stone', 'stone', { hard: 1.5, tool: P, tier: 1, drop: B.COBBLE });
+block(B.GRASS, 'Grass Block', ['grass_top', 'dirt', 'grass_side'], { hard: 0.6, tool: S, drop: B.DIRT, sound: 'grass' });
+block(B.DIRT, 'Dirt', 'dirt', { hard: 0.5, tool: S, sound: 'dirt' });
+block(B.COBBLE, 'Cobblestone', 'cobble', { hard: 2, tool: P, tier: 1 });
+block(B.PLANKS, 'Oak Planks', 'planks', { hard: 2, tool: A, sound: 'wood', fuel: 15 });
+block(B.SAND, 'Sand', 'sand', { hard: 0.5, tool: S, sound: 'sand', gravity: true });
+block(B.GRAVEL, 'Gravel', 'gravel', { hard: 0.6, tool: S, sound: 'dirt', gravity: true });
+block(B.LOG, 'Oak Log', ['log_top', 'log_top', 'log_side'], { hard: 2, tool: A, sound: 'wood', fuel: 15 });
+block(B.LEAVES, 'Oak Leaves', 'leaves', { hard: 0.2, drop: 0, sound: 'grass' });
+block(B.GLASS, 'Glass', 'glass', { opaque: false, alpha: 80, hard: 0.3, drop: 0, sound: 'glass' });
+block(B.WATER, 'Water', 'water', { render: 'liquid', alpha: 188, hard: -1, drop: 0, replaceable: true, hidden: true });
+block(B.BEDROCK, 'Bedrock', 'bedrock', { hard: -1 });
+block(B.COAL_ORE, 'Coal Ore', 'coal_ore', { hard: 3, tool: P, tier: 1, drop: I.COAL });
+block(B.IRON_ORE, 'Iron Ore', 'iron_ore', { hard: 3, tool: P, tier: 2 });
+block(B.GOLD_ORE, 'Gold Ore', 'gold_ore', { hard: 3, tool: P, tier: 3 });
+block(B.DIAMOND_ORE, 'Diamond Ore', 'diamond_ore', { hard: 3, tool: P, tier: 3, drop: I.DIAMOND });
+block(B.SNOWGRASS, 'Snowy Grass', ['snow', 'dirt', 'snow_side'], { hard: 0.6, tool: S, drop: B.DIRT, sound: 'grass' });
+block(B.SNOW, 'Snow Block', 'snow', { hard: 0.3, tool: S, sound: 'sand' });
+block(B.ICE, 'Ice', 'ice', { opaque: false, alpha: 200, hard: 0.5, tool: P, drop: 0, sound: 'glass' });
+block(B.CACTUS, 'Cactus', ['cactus_top', 'cactus_top', 'cactus_side'], { hard: 0.4, sound: 'grass' });
+block(B.BIRCH_LOG, 'Birch Log', ['birch_top', 'birch_top', 'birch_side'], { hard: 2, tool: A, sound: 'wood', fuel: 15 });
+block(B.BIRCH_LEAVES, 'Birch Leaves', 'birch_leaves', { hard: 0.2, drop: 0, sound: 'grass' });
+block(B.SPRUCE_LOG, 'Spruce Log', ['spruce_top', 'spruce_top', 'spruce_side'], { hard: 2, tool: A, sound: 'wood', fuel: 15 });
+block(B.SPRUCE_LEAVES, 'Spruce Leaves', 'spruce_leaves', { hard: 0.2, drop: 0, sound: 'grass' });
+block(B.SANDSTONE, 'Sandstone', ['sandstone_top', 'sandstone_top', 'sandstone_side'], { hard: 0.8, tool: P, tier: 1 });
+block(B.BRICK, 'Bricks', 'brick', { hard: 2, tool: P, tier: 1 });
+block(B.CRAFTING_TABLE, 'Crafting Table', ['table_top', 'planks', 'table_side', 'table_front'], { hard: 2.5, tool: A, sound: 'wood', fuel: 15 });
+block(B.FURNACE, 'Furnace', ['furnace_top', 'furnace_top', 'furnace_side', 'furnace_front'], { hard: 3.5, tool: P, tier: 1 });
+block(B.FURNACE_LIT, 'Furnace', ['furnace_top', 'furnace_top', 'furnace_side', 'furnace_lit'], { hard: 3.5, tool: P, tier: 1, light: 2, drop: B.FURNACE, hidden: true });
+block(B.TORCH, 'Torch', 'torch', { render: 'torch', light: 3, hard: 0, sound: 'wood' });
+block(B.TNT, 'TNT', ['tnt_top', 'tnt_bottom', 'tnt_side'], { hard: 0, sound: 'grass' });
+block(B.TALLGRASS, 'Grass', 'tallgrass', { render: 'cross', hard: 0, drop: 0, sound: 'grass', replaceable: true });
+block(B.FLOWER_RED, 'Poppy', 'flower_red', { render: 'cross', hard: 0, sound: 'grass' });
+block(B.FLOWER_YELLOW, 'Dandelion', 'flower_yellow', { render: 'cross', hard: 0, sound: 'grass' });
+block(B.GLOWSTONE, 'Glowstone', 'glowstone', { hard: 0.3, light: 3, sound: 'glass' });
+block(B.LAVA, 'Lava', 'lava', { render: 'liquid', light: 3, hard: -1, drop: 0, replaceable: true, hidden: true });
+block(B.OBSIDIAN, 'Obsidian', 'obsidian', { hard: 50, tool: P, tier: 4 });
+block(B.WOOL_WHITE, 'White Wool', 'wool_white', { hard: 0.8, sound: 'cloth' });
+block(B.WOOL_RED, 'Red Wool', 'wool_red', { hard: 0.8, sound: 'cloth' });
+block(B.WOOL_BLUE, 'Blue Wool', 'wool_blue', { hard: 0.8, sound: 'cloth' });
+block(B.WOOL_GREEN, 'Green Wool', 'wool_green', { hard: 0.8, sound: 'cloth' });
+block(B.WOOL_YELLOW, 'Yellow Wool', 'wool_yellow', { hard: 0.8, sound: 'cloth' });
+block(B.WOOL_BLACK, 'Black Wool', 'wool_black', { hard: 0.8, sound: 'cloth' });
+block(B.BOOKSHELF, 'Bookshelf', ['planks', 'planks', 'bookshelf'], { hard: 1.5, tool: A, sound: 'wood', fuel: 15 });
+block(B.IRON_BLOCK, 'Block of Iron', 'iron_block', { hard: 5, tool: P, tier: 2 });
+block(B.GOLD_BLOCK, 'Block of Gold', 'gold_block', { hard: 3, tool: P, tier: 3 });
+block(B.DIAMOND_BLOCK, 'Block of Diamond', 'diamond_block', { hard: 5, tool: P, tier: 3 });
+block(B.STONE_BRICKS, 'Stone Bricks', 'stone_bricks', { hard: 1.5, tool: P, tier: 1 });
+block(B.DEADBUSH, 'Dead Bush', 'deadbush', { render: 'cross', hard: 0, drop: I.STICK, sound: 'grass', replaceable: true });
+block(B.BIRCH_PLANKS, 'Birch Planks', 'birch_planks', { hard: 2, tool: A, sound: 'wood', fuel: 15 });
+block(B.SPRUCE_PLANKS, 'Spruce Planks', 'spruce_planks', { hard: 2, tool: A, sound: 'wood', fuel: 15 });
+
+function item(id: number, name: string, icon: string, o: { stack?: number; tool?: ToolDef; food?: number; fuel?: number } = {}) {
+  ITEMS.set(id, { id, name, isBlock: false, stack: o.stack ?? 64, tool: o.tool, food: o.food ?? 0, fuel: o.fuel ?? 0, hidden: false, icon });
+}
+
+item(I.STICK, 'Stick', 'stick', { fuel: 5 });
+item(I.COAL, 'Coal', 'coal', { fuel: 80 });
+item(I.IRON_INGOT, 'Iron Ingot', 'iron_ingot');
+item(I.GOLD_INGOT, 'Gold Ingot', 'gold_ingot');
+item(I.DIAMOND, 'Diamond', 'diamond');
+export const TOOL_MATS: ReadonlyArray<readonly [string, string, number, number]> = [['wood', 'Wooden', 1, 60], ['stone', 'Stone', 2, 132], ['iron', 'Iron', 3, 251], ['diamond', 'Diamond', 4, 1562]];
+export const TOOL_TYPES: ReadonlyArray<readonly [ToolType, string, number]> = [['pickaxe', 'Pickaxe', 1], ['axe', 'Axe', 2], ['shovel', 'Shovel', 0.5], ['sword', 'Sword', 3]];
+export const toolId = (mat: number, type: number) => I.TOOL0 + mat * 4 + type;
+TOOL_MATS.forEach(([mk, mn, tier, dur], mi) => TOOL_TYPES.forEach(([tk, tn, dmg], ti) => {
+  item(toolId(mi, ti), `${mn} ${tn}`, `${mk}_${tk}`, { stack: 1, tool: { type: tk, tier, dur, damage: 1 + dmg + tier, mat: mk }, fuel: mk === 'wood' ? 10 : 0 });
+}));
+item(I.PORK_RAW, 'Raw Porkchop', 'pork_raw', { food: 3 });
+item(I.PORK_COOKED, 'Cooked Porkchop', 'pork_cooked', { food: 8 });
+item(I.BEEF_RAW, 'Raw Beef', 'beef_raw', { food: 3 });
+item(I.BEEF_COOKED, 'Steak', 'beef_cooked', { food: 8 });
+item(I.APPLE, 'Apple', 'apple', { food: 4 });
+item(I.GUNPOWDER, 'Gunpowder', 'gunpowder');
+item(I.ROTTEN_FLESH, 'Rotten Flesh', 'rotten_flesh', { food: 2 });
+
+export const TOOL_SPEED = [1, 2, 4, 6, 8];
+
+export const SMELT = new Map<number, number>([
+  [B.SAND, B.GLASS], [B.COBBLE, B.STONE], [B.IRON_ORE, I.IRON_INGOT], [B.GOLD_ORE, I.GOLD_INGOT],
+  [I.PORK_RAW, I.PORK_COOKED], [I.BEEF_RAW, I.BEEF_COOKED], [B.LOG, I.COAL], [B.BIRCH_LOG, I.COAL],
+  [B.SPRUCE_LOG, I.COAL], [B.COAL_ORE, I.COAL], [B.DIAMOND_ORE, I.DIAMOND], [B.STONE, B.STONE_BRICKS],
+]);
+
+export const itemName = (id: number) => ITEMS.get(id)?.name ?? '?';
+export const maxStack = (id: number) => ITEMS.get(id)?.stack ?? 64;
+export const isBlockId = (id: number) => id < ITEM_BASE;
+
+// Flat lookup tables for the hot loops.
+export const OPAQUE = new Uint8Array(256), SOLID = new Uint8Array(256), LIQUID = new Uint8Array(256), LIGHT = new Uint8Array(256);
+export const REPLACEABLE = new Uint8Array(256), CUBE = new Uint8Array(256);
+for (let id = 0; id < B.COUNT; id++) {
+  const d = BLOCKS[id];
+  OPAQUE[id] = d.opaque ? 1 : 0; SOLID[id] = d.solid ? 1 : 0; LIQUID[id] = d.liquid ? 1 : 0; LIGHT[id] = d.light;
+  REPLACEABLE[id] = d.replaceable ? 1 : 0; CUBE[id] = d.render === 'cube' ? 1 : 0;
+}
+export const isOpaque = (id: number) => OPAQUE[id] === 1;
+export const isSolid = (id: number) => SOLID[id] === 1;
 
 // Face directions: 0:+X 1:-X 2:+Y 3:-Y 4:+Z 5:-Z
 export const DIR_N: ReadonlyArray<readonly [number, number, number]> = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
@@ -107,91 +177,66 @@ export const DIR_N: ReadonlyArray<readonly [number, number, number]> = [[1, 0, 0
 export const DIR_O: ReadonlyArray<readonly [number, number, number]> = [[1, 1, 0], [0, 1, 1], [0, 1, 0], [0, 0, 1], [1, 1, 1], [0, 1, 0]];
 export const DIR_U: ReadonlyArray<readonly [number, number, number]> = [[0, 0, 1], [0, 0, -1], [1, 0, 0], [1, 0, 0], [-1, 0, 0], [1, 0, 0]];
 export const DIR_V: ReadonlyArray<readonly [number, number, number]> = [[0, -1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, -1, 0]];
-export const DIR_SHADE = [0.72, 0.72, 1.0, 0.5, 0.86, 0.86];
+export const DIR_SHADE = [0.74, 0.74, 1.0, 0.52, 0.87, 0.87];
 /** Sky light multiplier per exposure level: open sky, shade, deep underground. */
-export const SKY_MUL = [1.0, 0.68, 0.34];
+export const SKY_MUL = [1.0, 0.66, 0.3];
 /** Artificial light per lamp level. Final light = max(sky * daylight, lamp). */
 export const LAMP_MUL = [0, 0.5, 0.75, 1.0];
 
 /**
  * Palette of base colors plus their light levels. Geometry refers to colors by id so faces can
- * be batched into one ThorVG shape per (depth bucket, color, fog level).
+ * be batched into one ThorVG shape per (depth bucket, color, fog level). Ids below DYNAMIC are
+ * permanent (block textures); the rest are recycled every frame (entities, particles).
  */
+const DYNAMIC = 52000, PAL_MAX = 65535;
 export class Palette {
-  r: number[] = []; g: number[] = []; b: number[] = []; a: number[] = []; sky: number[] = []; lamp: number[] = [];
-  private lookup = new Map<number, number>();
+  r = new Uint8Array(PAL_MAX + 1); g = new Uint8Array(PAL_MAX + 1); b = new Uint8Array(PAL_MAX + 1); a = new Uint8Array(PAL_MAX + 1);
+  sky = new Uint8Array(PAL_MAX + 1); lamp = new Uint8Array(PAL_MAX + 1);
+  private fixed = new Map<number, number>();
   private dynamic = new Map<number, number>();
-  private staticCount = -1;
+  private nFixed = 1; private nDyn = DYNAMIC;
 
-  id(r: number, g: number, b: number, a = 255, sky = 0, lamp = 0): number {
+  private static key(r: number, g: number, b: number, a: number, sky: number, lamp: number) { return ((((r * 256 + g) * 256 + b) * 256 + a) * 4 + sky) * 4 + lamp; }
+
+  private put(id: number, r: number, g: number, b: number, a: number, sky: number, lamp: number) {
+    this.r[id] = r; this.g[id] = g; this.b[id] = b; this.a[id] = a; this.sky[id] = sky; this.lamp[id] = lamp;
+  }
+
+  /** Permanent color. */
+  fixedId(r: number, g: number, b: number, a = 255, sky = 0, lamp = 0): number {
     r = r > 255 ? 255 : r < 0 ? 0 : Math.round(r); g = g > 255 ? 255 : g < 0 ? 0 : Math.round(g); b = b > 255 ? 255 : b < 0 ? 0 : Math.round(b);
-    const key = ((((r * 256 + g) * 256 + b) * 256 + a) * 4 + sky) * 4 + lamp;
-    let id = this.lookup.get(key);
+    const key = Palette.key(r, g, b, a, sky, lamp);
+    let id = this.fixed.get(key);
     if (id !== undefined) return id;
-    const frozen = this.staticCount >= 0;
-    if (frozen) {
-      id = this.dynamic.get(key);
-      if (id !== undefined) return id;
-    }
-    id = this.r.length;
-    if (id >= 65000) return 0;
-    this.r.push(r); this.g.push(g); this.b.push(b); this.a.push(a); this.sky.push(sky); this.lamp.push(lamp);
-    (frozen ? this.dynamic : this.lookup).set(key, id);
+    if (this.nFixed >= DYNAMIC) return 0;
+    id = this.nFixed++;
+    this.put(id, r, g, b, a, sky, lamp);
+    this.fixed.set(key, id);
     return id;
   }
 
-  /** Everything registered so far (block faces, decals) becomes permanent. */
-  freeze() { this.staticCount = this.r.length; }
+  /** Per-frame color. */
+  id(r: number, g: number, b: number, a = 255, sky = 0, lamp = 0): number {
+    r = r > 255 ? 255 : r < 0 ? 0 : Math.round(r); g = g > 255 ? 255 : g < 0 ? 0 : Math.round(g); b = b > 255 ? 255 : b < 0 ? 0 : Math.round(b);
+    const key = Palette.key(r, g, b, a, sky, lamp);
+    let id = this.fixed.get(key);
+    if (id !== undefined) return id;
+    id = this.dynamic.get(key);
+    if (id !== undefined) return id;
+    if (this.nDyn > PAL_MAX) return 0;
+    id = this.nDyn++;
+    this.put(id, r, g, b, a, sky, lamp);
+    this.dynamic.set(key, id);
+    return id;
+  }
 
-  /** Drops the per-frame colors registered by entities and particles. */
   resetDynamic() {
-    if (this.staticCount < 0 || this.r.length === this.staticCount) return;
-    const n = this.staticCount;
-    this.r.length = n; this.g.length = n; this.b.length = n; this.a.length = n; this.sky.length = n; this.lamp.length = n;
+    if (this.nDyn === DYNAMIC) return;
+    this.nDyn = DYNAMIC;
     this.dynamic.clear();
   }
 
-  get size() { return this.r.length; }
+  get size() { return this.nFixed; }
 }
 
 export const palette = new Palette();
-
-export interface BakedDecal { u0: number; v0: number; u1: number; v1: number; ids: number[] /* [sky * 4 + lamp] */ }
-
-/** decals[block][dir] */
-export const decals: BakedDecal[][][] = [];
-const VARIANT = [1.0, 0.955];
-// faceColor[(((block * 6 + dir) * 3 + sky) * 4 + lamp) * 2 + variant]
-const faceColor: number[] = [];
-
-export const faceColorId = (block: number, dir: number, sky: number, lamp: number, variant: number) =>
-  faceColor[(((block * 6 + dir) * 3 + sky) * 4 + lamp) * 2 + variant];
-
-for (let id = 0; id < B.COUNT; id++) {
-  const bd = BLOCKS[id];
-  decals[id] = [];
-  for (let dir = 0; dir < 6; dir++) {
-    const base = dir === 2 ? bd.top : dir === 3 ? bd.bottom : bd.side;
-    const alpha = bd.alpha ?? 255;
-    const m = bd.emissive ? 1 : DIR_SHADE[dir];
-    for (let s = 0; s < 3; s++) for (let l = 0; l < 4; l++) for (let v = 0; v < 2; v++) {
-      const k = VARIANT[v] * m;
-      faceColor[(((id * 6 + dir) * 3 + s) * 4 + l) * 2 + v] = palette.id(base[0] * k, base[1] * k, base[2] * k, alpha, s, bd.emissive ? 3 : l);
-    }
-    const defs = dir === 2 || dir === 3 ? bd.decalsTop : bd.decalsSide;
-    decals[id][dir] = (defs ?? []).map((dd) => {
-      const ids: number[] = [];
-      for (let s = 0; s < 3; s++) for (let l = 0; l < 4; l++) ids[s * 4 + l] = palette.id(dd.color[0] * m, dd.color[1] * m, dd.color[2] * m, 255, s, bd.emissive ? 3 : l);
-      return { u0: dd.rect[0], v0: dd.rect[1], u1: dd.rect[2], v1: dd.rect[3], ids };
-    });
-  }
-}
-
-palette.freeze();
-
-/** Flat icon color for HUD and the minimap. */
-export const iconColor = (id: number): RGB => {
-  if (id === Item.PORK) return [236, 132, 140];
-  if (id === Item.GEM) return [92, 226, 232];
-  return BLOCKS[id]?.top ?? [255, 0, 255];
-};

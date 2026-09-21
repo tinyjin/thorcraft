@@ -46,7 +46,7 @@ function moveAxis(world: World, b: Body, axis: 0 | 1 | 2, delta: number): boolea
 export function stepBody(world: World, b: Body, dt: number, gravity: number): number {
   const feet = world.getBlock(Math.floor(b.x), Math.floor(b.y + 0.1), Math.floor(b.z));
   const waist = world.getBlock(Math.floor(b.x), Math.floor(b.y + b.h * 0.5), Math.floor(b.z));
-  b.inWater = feet === B.WATER || waist === B.WATER;
+  b.inWater = feet === B.WATER || waist === B.WATER || feet === B.LAVA || waist === B.LAVA;
 
   if (b.inWater) {
     b.vy -= gravity * 0.25 * dt;
@@ -83,7 +83,8 @@ export function raycast(world: World, ox: number, oy: number, oz: number, dx: nu
   let nx = 0, ny = 0, nz = 0, t = 0;
   for (let i = 0; i < 256; i++) {
     const id = world.getBlock(x, y, z);
-    if (id !== B.AIR && !BLOCKS[id].liquid) return { x, y, z, nx, ny, nz, dist: t, block: id };
+    // Non-solid blocks the ray starts inside of (tall grass around the head) are not targetable.
+    if (id !== B.AIR && !BLOCKS[id].liquid && (i > 0 || BLOCKS[id].solid)) return { x, y, z, nx, ny, nz, dist: t, block: id };
     if (tx < ty && tx < tz) { x += sx; t = tx; tx += tdx; nx = -sx; ny = 0; nz = 0; }
     else if (ty < tz) { y += sy; t = ty; ty += tdy; nx = 0; ny = -sy; nz = 0; }
     else { z += sz; t = tz; tz += tdz; nx = 0; ny = 0; nz = -sz; }

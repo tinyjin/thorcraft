@@ -1,19 +1,31 @@
-// In-game HUD and menus, drawn with ThorVG like everything else.
+// In-game HUD, menus and item windows, drawn with ThorVG like everything else.
 
-import { B, BLOCKS, Item, iconColor, itemName } from './blocks';
+import { B, BLOCKS, ITEMS, itemName } from './blocks';
 import { Input } from './input';
-import { CREATIVE_ITEMS, HOTBAR, Inventory, RECIPES, Stack } from './inventory';
+import { COOK_TIME, CREATIVE_ITEMS, Furnace, HOTBAR, Inventory, SlotKind, SlotRef, Stack, WindowState, makeStack } from './inventory';
 import { Player } from './player';
-import { UILayer, isoCube } from './ui';
+import { texture } from './textures';
+import { UILayer } from './ui';
 import { SEA, World } from './world';
 
 const HEART = ['0110110', '1111111', '1111111', '0111110', '0011100', '0001000'];
 const WHITE = [255, 255, 255, 255] as const;
+const PANEL = [198, 198, 198, 250] as const, PANEL_TEXT = [58, 58, 62, 255] as const;
 
 export interface HudInfo {
   fps: number; debug: boolean; debugLines: string[]; gems: number; toast: string; toastAlpha: number;
-  breakProgress: number; renderer: string; thirdPerson: boolean; timeOfDay: number;
+  nameAlpha: number; timeOfDay: number; inLava: boolean;
 }
+
+export interface Settings { renderDist: number; fov: number; sens: number; vol: number; auto: boolean }
+export type WindowKind = 'inventory' | 'crafting' | 'furnace';
+
+const mapColorCache = new Map<number, readonly [number, number, number]>();
+const mapColor = (id: number) => {
+  let c = mapColorCache.get(id);
+  if (!c) mapColorCache.set(id, (c = texture(BLOCKS[id].faces[2]).avg));
+  return c;
+};
 
 export class Hud {
   readonly scene: any;
@@ -22,9 +34,12 @@ export class Hud {
   private mapKey = '';
   private mapTimer = 0;
   private hud: UILayer; private menu: UILayer; private top: UILayer;
+  private dragging = '';
   w = 0; h = 0;
   /** Set by buttons each frame. */
   hot = false;
+  seedText = '';
+  private seedFocus = false;
 
   constructor(private TVG: any, private input: Input, font: string) {
     this.scene = new TVG.Scene();
@@ -38,44 +53,64 @@ export class Hud {
   begin(w: number, h: number) {
     this.w = w; this.h = h; this.hot = false;
     this.hud.begin(); this.menu.begin(); this.top.begin();
+    if (!this.input.buttons[0]) this.dragging = '';
   }
 
   end() { this.hud.end(); this.menu.end(); this.top.end(); }
 
   // ------------------------------------------------------------------ widgets
 
-  private icon(ui: UILayer, id: number, cx: number, cy: number, r: number) {
-    if (id === Item.PORK) {
-      ui.rect(cx - r * 0.8, cy - r * 0.5, r * 1.6, r, [236, 132, 140], r * 0.4);
-      ui.rect(cx - r * 0.5, cy - r * 0.25, r * 0.6, r * 0.5, [250, 190, 190], r * 0.2);
-    } else if (id === Item.GEM) {
-      ui.poly([cx, cy - r, cx + r * 0.8, cy - r * 0.2, cx, cy + r, cx - r * 0.8, cy - r * 0.2], [92, 226, 232]);
-      ui.poly([cx, cy - r, cx + r * 0.8, cy - r * 0.2, cx - r * 0.8, cy - r * 0.2], [190, 250, 252]);
-    } else {
-      const bd = BLOCKS[id];
-      isoCube(ui, cx, cy, r, bd.top, bd.side, Math.max(bd.alpha ?? 255, 140));
+  private over(x: number, y: number, w: number, h: number) {
+    const i = this.input;
+    return i.mouseX >= x && i.mouseX < x + w && i.mouseY >= y && i.mouseY < y + h;
+  }
+
+  private stack(ui: UILayer, s: Stack, x: number, y: number, size: number) {
+    ui.icon(s.id, x + size / 2, y + size / 2, size * 0.3);
+    if (s.count > 1) ui.text(String(s.count), x + size - 4, y + size - 2, size * 0.3, WHITE, 1, 1, 2);
+    const tool = ITEMS.get(s.id)?.tool;
+    if (tool && s.dur !== undefined && s.dur < tool.dur) {
+      const f = s.dur / tool.dur;
+      ui.overRect(x + 5, y + size - 8, size - 10, 3.5, [0, 0, 0, 255]);
+      ui.overRect(x + 5, y + size - 8, (size - 10) * f, 3.5, [Math.floor(255 * Math.min(1, 2 - 2 * f)), Math.floor(230 * Math.min(1, 2 * f)), 40, 255]);
     }
   }
 
-  private slot(ui: UILayer, x: number, y: number, size: number, stack: Stack | null, selected: boolean, hover = false) {
-    ui.rect(x, y, size, size, hover ? [70, 76, 92, 230] : [24, 26, 34, 190], 6);
-    if (selected) ui.frame(x - 1, y - 1, size + 2, size + 2, [255, 255, 255, 255], 3, 7);
-    else ui.frame(x, y, size, size, [120, 126, 140, 160], 1.5, 6);
-    if (stack) {
-      this.icon(ui, stack.id, x + size / 2, y + size / 2, size * 0.3);
-      if (stack.count > 1) ui.text(String(stack.count), x + size - 5, y + size - 3, size * 0.3, WHITE, 1, 1, 2);
-    }
+  /** Minecraft style beveled slot on a light panel. */
+  private slot(ui: UILayer, x: number, y: number, size: number, s: Stack | null, hover: boolean, selected = false) {
+    ui.rect(x, y, size, size, [55, 55, 55, 255]);
+    ui.rect(x + 2, y + 2, size - 2, size - 2, [255, 255, 255, 255]);
+    ui.rect(x + 2, y + 2, size - 4, size - 4, hover ? [176, 180, 196, 255] : [139, 139, 139, 255]);
+    if (selected) ui.frame(x + 1, y + 1, size - 2, size - 2, [255, 255, 255, 255], 2);
+    if (s) this.stack(ui, s, x, y, size);
   }
 
   button(label: string, x: number, y: number, w: number, h: number, enabled = true): boolean {
     const ui = this.menu, inp = this.input;
-    const over = enabled && inp.mouseX >= x && inp.mouseX <= x + w && inp.mouseY >= y && inp.mouseY <= y + h;
+    const over = enabled && this.over(x, y, w, h);
     if (over) this.hot = true;
-    ui.rect(x, y + 3, w, h, [0, 0, 0, 120], 8);
-    ui.rect(x, y, w, h, !enabled ? [60, 62, 70, 220] : over ? [88, 150, 86, 255] : [58, 62, 78, 240], 8);
-    ui.frame(x, y, w, h, over ? [210, 255, 200, 255] : [150, 156, 176, 200], 2, 8);
-    ui.text(label, x + w / 2, y + h / 2, Math.min(20, h * 0.42), enabled ? WHITE : [150, 150, 150, 255], 0.5, 0.5);
+    ui.rect(x - 2, y - 2, w + 4, h + 4, [0, 0, 0, 255]);
+    ui.rect(x, y, w, h, [170, 170, 170, 255]);
+    ui.rect(x + 2, y + 2, w - 2, h - 2, [52, 52, 52, 255]);
+    ui.rect(x + 2, y + 2, w - 4, h - 4, !enabled ? [70, 70, 70, 255] : over ? [123, 134, 201, 255] : [110, 110, 110, 255]);
+    ui.text(label, x + w / 2, y + h / 2, Math.min(18, h * 0.4), enabled ? WHITE : [160, 160, 160, 255], 0.5, 0.5, 2);
     return over && inp.clicked[0];
+  }
+
+  /** Horizontal slider; returns the (possibly changed) value. */
+  private slider(name: string, label: string, x: number, y: number, w: number, h: number, value: number, min: number, max: number): number {
+    const ui = this.menu, inp = this.input;
+    const over = this.over(x, y, w, h);
+    if (over) this.hot = true;
+    if (over && inp.clicked[0]) this.dragging = name;
+    if (this.dragging === name) value = Math.round(min + Math.min(1, Math.max(0, (inp.mouseX - x - 8) / (w - 16))) * (max - min));
+    ui.rect(x - 2, y - 2, w + 4, h + 4, [0, 0, 0, 255]);
+    ui.rect(x, y, w, h, [42, 42, 42, 255]);
+    const kx = x + 2 + ((value - min) / (max - min)) * (w - 20);
+    ui.rect(kx, y + 2, 16, h - 4, this.dragging === name || over ? [123, 134, 201, 255] : [150, 150, 150, 255]);
+    ui.frame(kx, y + 2, 16, h - 4, [230, 230, 230, 255], 1.5);
+    ui.text(label, x + w / 2, y + h / 2, 15, WHITE, 0.5, 0.5, 2);
+    return value;
   }
 
   // ------------------------------------------------------------------ gameplay HUD
@@ -83,38 +118,48 @@ export class Hud {
   drawGame(player: Player, inv: Inventory, info: HudInfo, time: number) {
     const ui = this.hud, w = this.w, h = this.h;
 
-    if (player.headInWater) ui.rect(0, 0, w, h, [20, 60, 160, 90]);
-    if (player.hurtTimer > 0) ui.rect(0, 0, w, h, [220, 20, 20, Math.floor(player.hurtTimer * 320)]);
-    // Vignette at night makes the scene feel darker without hiding geometry.
-
-    if (!info.thirdPerson) this.drawHand(ui, player, inv, time);
+    if (info.inLava) ui.rect(0, 0, w, h, [230, 80, 10, 140]);
+    else if (player.headInWater) ui.rect(0, 0, w, h, [20, 60, 170, 95]);
+    if (player.hurtTimer > 0) {
+      const a = Math.floor(player.hurtTimer * 420), e = Math.min(w, h) * 0.16;
+      ui.rect(0, 0, w, e, [200, 0, 0, a]); ui.rect(0, h - e, w, e, [200, 0, 0, a]);
+      ui.rect(0, e, e, h - 2 * e, [200, 0, 0, a]); ui.rect(w - e, e, e, h - 2 * e, [200, 0, 0, a]);
+      ui.rect(0, 0, w, h, [200, 0, 0, a >> 2]);
+    }
 
     // Crosshair
     const cx = w / 2, cy = h / 2;
-    ui.rect(cx - 10, cy - 1.5, 20, 3, [0, 0, 0, 120]);
-    ui.rect(cx - 1.5, cy - 10, 3, 20, [0, 0, 0, 120]);
-    ui.rect(cx - 9, cy - 0.75, 18, 1.5, [255, 255, 255, 230]);
-    ui.rect(cx - 0.75, cy - 9, 1.5, 18, [255, 255, 255, 230]);
-    if (info.breakProgress > 0) {
-      ui.rect(cx - 24, cy + 20, 48, 6, [0, 0, 0, 150], 3);
-      ui.rect(cx - 23, cy + 21, 46 * info.breakProgress, 4, [255, 255, 255, 230], 2);
-    }
+    ui.rect(cx - 11, cy - 2, 22, 4, [0, 0, 0, 110]);
+    ui.rect(cx - 2, cy - 11, 4, 22, [0, 0, 0, 110]);
+    ui.rect(cx - 10, cy - 1, 20, 2, [255, 255, 255, 235]);
+    ui.rect(cx - 1, cy - 10, 2, 20, [255, 255, 255, 235]);
 
     // Hotbar
-    const size = Math.min(52, (w - 40) / HOTBAR), gap = 4;
-    const total = HOTBAR * size + (HOTBAR - 1) * gap;
-    const x0 = (w - total) / 2, y0 = h - size - 14;
-    for (let i = 0; i < HOTBAR; i++) this.slot(ui, x0 + i * (size + gap), y0, size, inv.slots[i], i === inv.selected);
+    const size = Math.min(50, (w - 40) / HOTBAR);
+    const total = HOTBAR * size;
+    const x0 = (w - total) / 2, y0 = h - size - 12;
+    ui.rect(x0 - 3, y0 - 3, total + 6, size + 6, [0, 0, 0, 120]);
+    for (let i = 0; i < HOTBAR; i++) {
+      const x = x0 + i * size;
+      ui.rect(x + 1, y0 + 1, size - 2, size - 2, [60, 60, 60, 130]);
+      ui.frame(x + 1, y0 + 1, size - 2, size - 2, [90, 90, 90, 220], 2);
+      const s = inv.slots[i];
+      if (s) this.stack(ui, s, x, y0, size);
+    }
+    const sx = x0 + inv.selected * size;
+    ui.frame(sx - 1, y0 - 1, size + 2, size + 2, [0, 0, 0, 255], 5);
+    ui.frame(sx - 1, y0 - 1, size + 2, size + 2, [255, 255, 255, 255], 3);
     const held = inv.held;
-    if (held) ui.text(itemName(held.id), w / 2, y0 - (player.creative ? 12 : 40), 15, WHITE, 0.5, 1, 2);
+    if (held && info.nameAlpha > 0) ui.text(itemName(held.id), w / 2, y0 - (player.creative ? 12 : 40), 16, [255, 255, 255, Math.floor(info.nameAlpha * 255)], 0.5, 1, 2);
 
     // Hearts and air
     if (!player.creative) {
       const px = 2.6, hy = y0 - 26;
       const full = ui.shape(), empty = ui.shape();
+      const hpInt = Math.ceil(player.health);
       for (let i = 0; i < 10; i++) {
-        const hp = player.health - i * 2;
-        const hx = x0 + i * (px * 8);
+        const hp = hpInt - i * 2;
+        const hx = x0 + 2 + i * (px * 8);
         const shake = player.health <= 6 ? Math.sin(time * 18 + i) * 1.2 : 0;
         for (let r = 0; r < HEART.length; r++) for (let c = 0; c < 7; c++) {
           if (HEART[r][c] !== '1') continue;
@@ -122,46 +167,31 @@ export class Hud {
           (filled ? full : empty).appendRect(hx + c * px, hy + r * px + shake, px + 0.3, px + 0.3);
         }
       }
-      empty.fill(40, 16, 20, 200);
-      full.fill(232, 48, 60, 255);
+      empty.fill(40, 16, 20, 210);
+      full.fill(232, 34, 42, 255);
       if (player.air < 10) {
         const bub = ui.shape();
         const n = Math.ceil(player.air);
         for (let i = 0; i < n; i++) bub.appendCircle(x0 + total - 8 - i * 18, hy + 8, 6.5, 6.5);
-        bub.fill(150, 210, 255, 220).stroke({ width: 1.5, color: [235, 250, 255, 255] });
+        bub.fill(124, 198, 255, 220).stroke({ width: 1.5, color: [235, 250, 255, 255] });
       }
     }
 
     // Gems + clock
-    ui.rect(12, 12, 150, 34, [18, 20, 28, 170], 8);
-    this.icon(ui, Item.GEM, 32, 29, 10);
+    ui.rect(12, 12, 150, 34, [0, 0, 0, 115]);
+    ui.poly([32, 19, 40, 27, 32, 39, 24, 27], [92, 226, 232]);
+    ui.poly([32, 19, 40, 27, 24, 27], [190, 250, 252]);
     ui.text(String(info.gems), 50, 29, 18, WHITE, 0, 0.5);
     const hr = Math.floor(((info.timeOfDay * 24 + 6) % 24));
     const mn = Math.floor((((info.timeOfDay * 24 + 6) % 24) - hr) * 60);
-    ui.text(`${String(hr).padStart(2, '0')}:${String(mn).padStart(2, '0')}`, 150, 29, 15, [200, 210, 230, 255], 1, 0.5);
-    ui.text(player.creative ? 'CREATIVE' : 'SURVIVAL', 14, 58, 11, [200, 210, 230, 200], 0, 0.5, 2);
+    ui.text(`${String(hr).padStart(2, '0')}:${String(mn).padStart(2, '0')}`, 150, 29, 15, [210, 218, 235, 255], 1, 0.5);
+    ui.text(player.creative ? 'CREATIVE' : 'SURVIVAL', 14, 58, 11, [225, 230, 240, 220], 0, 0.5, 2);
 
     if (info.toastAlpha > 0) ui.text(info.toast, w / 2, h * 0.24, 20, [255, 255, 255, Math.floor(info.toastAlpha * 255)], 0.5, 0.5, 3);
 
     if (info.debug) {
-      ui.rect(8, 76, 330, 18 * info.debugLines.length + 12, [0, 0, 0, 130], 6);
-      for (let i = 0; i < info.debugLines.length; i++) ui.text(info.debugLines[i], 16, 84 + i * 18, 13, [220, 255, 220, 255], 0, 0);
-    }
-  }
-
-  /** First-person arm with the held block. */
-  private drawHand(ui: UILayer, player: Player, inv: Inventory, time: number) {
-    const w = this.w, h = this.h, s = Math.min(w, h);
-    const sw = Math.sin(player.swing * Math.PI);
-    const bobX = Math.cos(player.walkPhase) * 8 * player.bob, bobY = Math.abs(Math.sin(player.walkPhase)) * 10 * player.bob;
-    const bx = w - s * 0.2 + bobX - sw * s * 0.12, by = h - s * 0.13 + bobY + sw * s * 0.08 + Math.sin(time * 1.4) * 2;
-    const held = inv.held;
-    // Arm
-    ui.poly([bx + s * 0.02, by + s * 0.02, bx + s * 0.13, by - s * 0.03, bx + s * 0.3, h + 40, bx + s * 0.12, h + 40], [222, 184, 40]);
-    ui.poly([bx + s * 0.13, by - s * 0.03, bx + s * 0.17, by + s * 0.01, bx + s * 0.36, h + 40, bx + s * 0.3, h + 40], [180, 146, 30]);
-    if (held) {
-      if (held.id < 100) { const bd = BLOCKS[held.id]; isoCube(ui, bx + s * 0.02, by - s * 0.03, s * 0.12, bd.top, bd.side, Math.max(bd.alpha ?? 255, 150)); }
-      else this.icon(ui, held.id, bx + s * 0.03, by - s * 0.02, s * 0.08);
+      ui.rect(8, 76, 380, 18 * info.debugLines.length + 12, [0, 0, 0, 120]);
+      for (let i = 0; i < info.debugLines.length; i++) ui.text(info.debugLines[i], 16, 84 + i * 18, 13, [225, 255, 225, 255], 0, 0);
     }
   }
 
@@ -183,8 +213,8 @@ export class Hud {
           const top = world.topAt(x, z);
           let id = top >= 0 ? world.getBlock(x, top, z) : B.AIR;
           if (top < SEA) { const above = world.getBlock(x, SEA, z); if (above === B.WATER || above === B.ICE) id = above; }
-          const base = iconColor(id);
-          const k = Math.min(1.15, 0.62 + Math.max(top, SEA) / 90 + ((top & 1) ? 0.03 : 0));
+          const base = mapColor(id);
+          const k = Math.min(1.15, 0.55 + Math.max(top, SEA) / 110 + ((top & 1) ? 0.03 : 0));
           c = (Math.min(255, base[0] * k) << 16) | (Math.min(255, base[1] * k) << 8) | Math.min(255, base[2] * k) | 0;
           c &= 0xf8f8f8; // quantize so columns batch into few shapes
         }
@@ -205,7 +235,7 @@ export class Hud {
     }
     this.mapScene.translate(ox, oy);
     const ui = this.hud;
-    ui.rect(ox - 4, oy - 4, size + 8, size + 8, [18, 20, 28, 200], 6);
+    ui.rect(ox - 4, oy - 4, size + 8, size + 8, [0, 0, 0, 150]);
     // Player arrow (drawn in the top layer so it sits above the map scene)
     const t = this.top;
     const cx = ox + size / 2, cy = oy + size / 2, a = player.yaw;
@@ -219,142 +249,170 @@ export class Hud {
 
   // ------------------------------------------------------------------ screens
 
-  private dim(alpha: number) { this.menu.rect(0, 0, this.w, this.h, [8, 10, 18, alpha]); }
+  private dim(alpha: number) { this.menu.rect(0, 0, this.w, this.h, [0, 0, 0, alpha]); }
 
-  drawTitle(hasSave: boolean, creative: boolean, renderer: string, time: number): string | null {
-    const ui = this.menu, w = this.w, h = this.h;
-    ui.rect(0, 0, w, h, [8, 10, 18, 90]);
-    const ty = h * 0.24;
-    // Block logo
-    const bs = Math.min(34, w / 24);
-    const cols: number[] = [B.GRASS, B.LOG, B.STONE, B.BRICK, B.DIAMOND_ORE, B.PLANKS, B.SAND, B.LAMP, B.TNT];
-    for (let i = 0; i < cols.length; i++) {
-      const bd = BLOCKS[cols[i]];
-      isoCube(ui, w / 2 + (i - 4) * bs * 2.1, ty - 84 + Math.sin(time * 2 + i * 0.7) * 6, bs, bd.top, bd.side);
-    }
-    ui.text('THORCRAFT', w / 2, ty, Math.min(84, w / 8), [255, 255, 255, 255], 0.5, 0.5, 8);
-    ui.text('a voxel sandbox drawn with a 2D vector engine', w / 2, ty + 58, 18, [225, 235, 250, 255], 0.5, 0.5, 3);
+  drawTitle(hasSave: boolean, renderer: string, time: number): string | null {
+    const ui = this.menu, inp = this.input, w = this.w, h = this.h;
+    ui.rect(0, 0, w, h, [8, 10, 18, 70]);
+    const ty = h * 0.2;
+    const bs = Math.min(30, w / 28);
+    const cols: number[] = [B.GRASS, B.LOG, B.STONE, B.BRICK, B.DIAMOND_ORE, B.PLANKS, B.CRAFTING_TABLE, B.GLOWSTONE, B.TNT];
+    for (let i = 0; i < cols.length; i++) ui.icon(cols[i], w / 2 + (i - 4) * bs * 2.1, ty - 78 + Math.sin(time * 2 + i * 0.7) * 6, bs);
+    ui.text('THORCRAFT', w / 2, ty, Math.min(84, w / 8), [235, 235, 235, 255], 0.5, 0.5, 8);
+    ui.text('an infinite voxel world drawn by ThorVG WebCanvas!', w / 2, ty + 56, 17, [255, 255, 85, 255], 0.5, 0.5, 2);
 
-    const bw = 300, bh = 50, bx = w / 2 - bw / 2;
-    let by = h * 0.5;
+    const bw = 380, bh = 44, bx = w / 2 - bw / 2, gap = 10;
+    let by = h * 0.4;
     let action: string | null = null;
-    if (this.button(hasSave ? 'Continue' : 'Play', bx, by, bw, bh)) action = 'play';
-    by += bh + 12;
-    if (this.button('New World', bx, by, bw, bh)) action = 'new';
-    by += bh + 12;
-    if (this.button(`Mode: ${creative ? 'Creative' : 'Survival'}`, bx, by, bw, bh)) action = 'mode';
-    by += bh + 12;
+    if (hasSave) { if (this.button('Continue', bx, by, bw, bh)) action = 'continue'; by += bh + gap; }
+    if (this.button('New World - Survival', bx, by, bw, bh)) action = 'survival';
+    by += bh + gap;
+    if (this.button('New World - Creative', bx, by, bw, bh)) action = 'creative';
+    by += bh + gap;
+
+    // Seed text field
+    const overSeed = this.over(bx, by, bw, bh);
+    if (inp.clicked[0]) this.seedFocus = overSeed;
+    if (this.seedFocus) {
+      for (const ch of inp.typed) {
+        if (ch === '\b') this.seedText = this.seedText.slice(0, -1);
+        else if (this.seedText.length < 24) this.seedText += ch;
+      }
+    }
+    ui.rect(bx - 2, by - 2, bw + 4, bh + 4, this.seedFocus ? [255, 255, 255, 255] : [160, 160, 160, 255]);
+    ui.rect(bx, by, bw, bh, [0, 0, 0, 255]);
+    const caret = this.seedFocus && Math.floor(time * 2) % 2 === 0 ? '_' : '';
+    if (this.seedText || this.seedFocus) ui.text(this.seedText + caret, w / 2, by + bh / 2, 17, WHITE, 0.5, 0.5);
+    else ui.text('Seed (leave empty for random)', w / 2, by + bh / 2, 15, [130, 130, 130, 255], 0.5, 0.5);
+    by += bh + gap;
     if (this.button(`Renderer: ${renderer === 'gl' ? 'WebGL' : renderer === 'wg' ? 'WebGPU' : 'Software'}`, bx, by, bw, bh)) action = 'renderer';
-    ui.text('WASD move  |  Space jump  |  Mouse look  |  LMB break  |  RMB place/use  |  E inventory  |  1-9 hotbar', w / 2, h - 46, 13, [225, 235, 250, 230], 0.5, 0.5, 2);
-    ui.text('F5 camera  |  F3 debug  |  T skip time  |  M map  |  double Space fly (creative)  |  Esc pause', w / 2, h - 26, 13, [225, 235, 250, 230], 0.5, 0.5, 2);
+
+    const keys = [
+      'WASD move  |  Space jump / swim  |  Shift sneak  |  Ctrl or double W sprint',
+      'LMB mine / attack  |  RMB place / use / eat  |  wheel, 1-9 hotbar  |  Q drop  |  E inventory + crafting',
+      'F5 / V camera  |  F3 debug  |  M map  |  creative: double Space fly, MMB pick block',
+    ];
+    keys.forEach((k, i) => ui.text(k, w / 2, h - 64 + i * 19, 12.5, [238, 238, 238, 235], 0.5, 0.5, 2));
     return action;
   }
 
-  drawPause(renderDistance: number, auto: boolean): string | null {
+  drawPause(st: Settings, creative: boolean): string | null {
     this.dim(150);
-    const w = this.w, h = this.h, bw = 300, bh = 50, bx = w / 2 - bw / 2;
-    this.menu.text('Paused', w / 2, h * 0.24, 46, WHITE, 0.5, 0.5, 5);
-    let by = h * 0.36, action: string | null = null;
-    if (this.button('Resume', bx, by, bw, bh)) action = 'resume';
-    by += bh + 12;
-    if (this.button('-', bx, by, 60, bh)) action = 'dist-';
-    this.menu.rect(bx + 68, by, bw - 136, bh, [30, 32, 42, 230], 8);
-    this.menu.text(`View distance: ${renderDistance}${auto ? ' (auto)' : ''}`, w / 2, by + bh / 2, 16, WHITE, 0.5, 0.5);
-    if (this.button('+', bx + bw - 60, by, 60, bh)) action = 'dist+';
-    by += bh + 12;
-    if (this.button(`Auto quality: ${auto ? 'On' : 'Off'}`, bx, by, bw, bh)) action = 'auto';
-    by += bh + 12;
-    if (this.button('Save & Quit to Title', bx, by, bw, bh)) action = 'quit';
+    const w = this.w, h = this.h, bw = 380, bh = 40, bx = w / 2 - bw / 2, gap = 10;
+    this.menu.text('Game Paused', w / 2, h * 0.16, 40, WHITE, 0.5, 0.5, 4);
+    let by = h * 0.26, action: string | null = null;
+    if (this.button('Back to Game', bx, by, bw, bh)) action = 'resume';
+    by += bh + gap;
+    const rd = this.slider('rd', `View distance: ${st.renderDist} chunks${st.auto ? ' (auto)' : ''}`, bx, by, bw, bh, st.renderDist, 2, 8);
+    if (rd !== st.renderDist) { st.renderDist = rd; st.auto = false; action = 'settings'; }
+    by += bh + gap;
+    const fov = this.slider('fov', `FOV: ${st.fov}`, bx, by, bw, bh, st.fov, 50, 110);
+    const sens = this.slider('sens', `Mouse sensitivity: ${st.sens}`, bx, by + bh + gap, bw, bh, st.sens, 2, 30);
+    const vol = this.slider('vol', `Volume: ${st.vol}`, bx, by + 2 * (bh + gap), bw, bh, st.vol, 0, 10);
+    if (fov !== st.fov || sens !== st.sens || vol !== st.vol) { st.fov = fov; st.sens = sens; st.vol = vol; action = 'settings'; }
+    by += 3 * (bh + gap);
+    if (this.button(`Auto quality: ${st.auto ? 'On' : 'Off'}`, bx, by, bw, bh)) action = 'auto';
+    by += bh + gap;
+    if (this.button(`Game mode: ${creative ? 'Creative' : 'Survival'} (click to switch)`, bx, by, bw, bh)) action = 'mode';
+    by += bh + gap;
+    if (this.button('Save and Quit to Title', bx, by, bw, bh)) action = 'quit';
     return action;
   }
 
   drawDead(gems: number): string | null {
-    this.menu.rect(0, 0, this.w, this.h, [120, 10, 10, 130]);
+    this.menu.rect(0, 0, this.w, this.h, [120, 0, 0, 140]);
     this.menu.text('You died!', this.w / 2, this.h * 0.32, 56, WHITE, 0.5, 0.5, 6);
     this.menu.text(`Gems collected: ${gems}`, this.w / 2, this.h * 0.32 + 56, 18, WHITE, 0.5, 0.5, 3);
-    if (this.button('Respawn', this.w / 2 - 150, this.h * 0.5, 300, 50)) return 'respawn';
+    if (this.button('Respawn', this.w / 2 - 190, this.h * 0.5, 380, 46)) return 'respawn';
     return null;
   }
 
-  /** Inventory, crafting (survival) or block palette (creative). Returns true if a UI sound should play. */
-  drawInventory(inv: Inventory, creative: boolean): boolean {
+  /**
+   * Inventory with 2x2 crafting, crafting table (3x3), furnace, or the creative palette.
+   * Returns true if a slot was clicked (for the UI sound).
+   */
+  drawWindow(kind: WindowKind, inv: Inventory, ws: WindowState, creative: boolean, furnace: Furnace | null): boolean {
     this.dim(140);
     const ui = this.menu, inp = this.input, w = this.w, h = this.h;
-    const size = 48, gap = 5, cols = 9;
-    const gridW = cols * size + (cols - 1) * gap;
-    const sideW = creative ? 0 : 300;
-    const panelW = gridW + 48 + sideW, panelH = creative ? 480 : 360;
-    const px = (w - panelW) / 2, py = (h - panelH) / 2;
-    ui.rect(px, py + 5, panelW, panelH, [0, 0, 0, 120], 14);
-    ui.rect(px, py, panelW, panelH, [44, 48, 62, 245], 14);
-    ui.frame(px, py, panelW, panelH, [150, 156, 176, 220], 2, 14);
-    let clicked = false;
-    let tip = '';
-    const gx = px + 24;
-    let gy = py + 50;
+    const palette = kind === 'inventory' && creative;
+    const palRows = Math.ceil(CREATIVE_ITEMS.length / 9);
+    const topRows = palette ? palRows : 3.4;
+    const size = Math.floor(Math.min(46, (h - 110) / (topRows + 5.2)));
+    const gridW = 9 * size, pad = 16;
+    const topH = topRows * size;
+    const panelW = gridW + pad * 2, panelH = topH + 4 * size + 78;
+    const px = Math.floor((w - panelW) / 2), py = Math.floor((h - panelH) / 2);
+    ui.rect(px - 2, py - 2, panelW + 4, panelH + 4, [0, 0, 0, 255]);
+    ui.rect(px, py, panelW, panelH, [255, 255, 255, 255]);
+    ui.rect(px + 3, py + 3, panelW - 3, panelH - 3, [85, 85, 85, 255]);
+    ui.rect(px + 3, py + 3, panelW - 6, panelH - 6, PANEL);
 
-    if (creative) {
-      ui.text('Blocks (click to put in the selected hotbar slot)', gx, py + 26, 16, WHITE, 0, 0.5);
-      for (let i = 0; i < CREATIVE_ITEMS.length; i++) {
-        const x = gx + (i % cols) * (size + gap), y = gy + Math.floor(i / cols) * (size + gap);
-        const over = inp.mouseX >= x && inp.mouseX < x + size && inp.mouseY >= y && inp.mouseY < y + size;
-        this.slot(ui, x, y, size, { id: CREATIVE_ITEMS[i], count: 1 }, false, over);
-        if (over) { tip = itemName(CREATIVE_ITEMS[i]); if (inp.clicked[0]) { inv.slots[inv.selected] = { id: CREATIVE_ITEMS[i], count: 64 }; clicked = true; } }
-      }
-      gy += 3 * (size + gap) + 34;
-      ui.text('Inventory', gx, gy - 16, 16, WHITE, 0, 0.5);
+    let clicked = false, tip = '';
+    const shift = inp.keys.has('ShiftLeft') || inp.keys.has('ShiftRight');
+    const cell = (arr: (Stack | null)[], i: number, k: SlotKind, x: number, y: number, sz = size) => {
+      const over = this.over(x, y, sz, sz);
+      this.slot(ui, x, y, sz, arr[i], over);
+      if (!over) return;
+      const s = arr[i];
+      if (s) tip = itemName(s.id);
+      const ref: SlotRef = { arr, i, kind: k };
+      if (inp.clicked[0]) { ws.click(ref, 0, shift, inv); clicked = true; }
+      else if (inp.clicked[2]) { ws.click(ref, 2, shift, inv); clicked = true; }
+    };
+
+    const gx = px + pad;
+    let gy = py + 30;
+    if (palette) {
+      ui.text('Creative - every block and item', gx, py + 17, 14, PANEL_TEXT, 0, 0.5);
+      const stacks = CREATIVE_ITEMS.map((id) => makeStack(id, 1));
+      for (let i = 0; i < stacks.length; i++) cell(stacks, i, 'palette', gx + (i % 9) * size, gy + Math.floor(i / 9) * size);
+    } else if (kind === 'furnace' && furnace) {
+      ui.text('Furnace', gx, py + 17, 14, PANEL_TEXT, 0, 0.5);
+      const fx = px + panelW / 2 - size * 2.2, fy = gy + 4;
+      cell(furnace.slots, 0, 'normal', fx, fy);
+      cell(furnace.slots, 1, 'fuel', fx, fy + size * 2.1);
+      // Flame gauge
+      const bf = furnace.burnMax ? Math.max(0, furnace.burn / furnace.burnMax) : 0;
+      ui.rect(fx + size * 0.3, fy + size * 1.15, size * 0.4, size * 0.8, [110, 110, 110, 255]);
+      if (bf > 0) ui.rect(fx + size * 0.3, fy + size * 1.15 + size * 0.8 * (1 - bf), size * 0.4, size * 0.8 * bf, [255, 140, 20, 255]);
+      // Progress arrow
+      const ax = fx + size * 1.5, ay = fy + size * 1.2, aw = size * 1.4;
+      ui.rect(ax, ay, aw, size * 0.28, [110, 110, 110, 255]);
+      ui.rect(ax, ay, aw * Math.min(1, furnace.cook / COOK_TIME), size * 0.28, [255, 255, 255, 255]);
+      cell(furnace.slots, 2, 'output', fx + size * 3.3, fy + size * 0.9, size * 1.2);
     } else {
-      ui.text('Inventory', gx, py + 26, 16, WHITE, 0, 0.5);
+      ui.text(kind === 'crafting' ? 'Crafting Table' : 'Crafting', gx, py + 17, 14, PANEL_TEXT, 0, 0.5);
+      const n = ws.craftSize;
+      const cx0 = px + panelW / 2 - size * (n === 3 ? 2.9 : 2.4), cy0 = gy + (3.4 - n) * size * 0.5 - 4;
+      for (let i = 0; i < n * n; i++) cell(ws.craft, i, 'craft', cx0 + (i % n) * size, cy0 + Math.floor(i / n) * size);
+      const ax = cx0 + n * size + size * 0.5, ay = cy0 + (n * size) / 2;
+      ui.rect(ax, ay - 4, size * 0.7, 8, [120, 120, 120, 255]);
+      ui.poly([ax + size * 0.7, ay - 12, ax + size * 1.05, ay, ax + size * 0.7, ay + 12], [120, 120, 120, 255]);
+      cell(ws.craftOut, 0, 'craftout', ax + size * 1.4, ay - size * 0.6, size * 1.2);
     }
 
-    // Main inventory rows (slots 9..35), then the hotbar.
-    for (let i = 0; i < 36; i++) {
-      const slotIndex = i < 27 ? i + 9 : i - 27;
-      const row = Math.floor(i / cols);
-      const x = gx + (i % cols) * (size + gap), y = gy + row * (size + gap) + (row === 3 ? 14 : 0);
-      const over = inp.mouseX >= x && inp.mouseX < x + size && inp.mouseY >= y && inp.mouseY < y + size;
-      this.slot(ui, x, y, size, inv.slots[slotIndex], slotIndex === inv.selected, over);
-      if (over) {
-        const s = inv.slots[slotIndex];
-        if (s) tip = itemName(s.id);
-        if (inp.clicked[0]) { inv.clickSlot(slotIndex); clicked = true; }
-        if (inp.clicked[2] && creative) { inv.slots[slotIndex] = null; clicked = true; }
-      }
-    }
-
-    if (!creative) {
-      const rx = gx + gridW + 24;
-      ui.text('Crafting', rx, py + 26, 16, WHITE, 0, 0.5);
-      for (let i = 0; i < RECIPES.length; i++) {
-        const r = RECIPES[i], y = py + 46 + i * 27, can = inv.canCraft(r);
-        const over = inp.mouseX >= rx && inp.mouseX < rx + sideW - 24 && inp.mouseY >= y && inp.mouseY < y + 25;
-        ui.rect(rx, y, sideW - 24, 25, over && can ? [88, 150, 86, 255] : can ? [58, 66, 84, 255] : [36, 38, 48, 255], 5);
-        this.icon(ui, r.out.id, rx + 15, y + 12.5, 8);
-        const need = r.in.map((s) => `${s.count} ${itemName(s.id)}`).join(' + ');
-        ui.text(`${r.out.count}x  <=  ${need}`, rx + 32, y + 12.5, 11.5, can ? WHITE : [140, 144, 156, 255], 0, 0.5);
-        if (over && can && inp.clicked[0]) { inv.craft(r); clicked = true; }
-      }
-    }
-
-    ui.text('E or Esc to close', px + panelW / 2, py + panelH - 16, 12, [190, 196, 214, 255], 0.5, 0.5);
+    gy = py + 30 + topH + 22;
+    ui.text('Inventory', gx, gy - 11, 14, PANEL_TEXT, 0, 0.5);
+    for (let i = 9; i < 36; i++) cell(inv.slots, i, 'normal', gx + ((i - 9) % 9) * size, gy + Math.floor((i - 9) / 9) * size);
+    for (let i = 0; i < 9; i++) cell(inv.slots, i, 'normal', gx + i * size, gy + 3 * size + 8);
 
     // Cursor stack and tooltip float above everything.
     const t = this.top;
-    if (inv.cursor) {
-      this.icon(t, inv.cursor.id, inp.mouseX, inp.mouseY, size * 0.3);
-      if (inv.cursor.count > 1) t.text(String(inv.cursor.count), inp.mouseX + 16, inp.mouseY + 18, 14, WHITE, 1, 1, 2);
-    } else if (tip) {
-      t.rect(inp.mouseX + 12, inp.mouseY - 30, tip.length * 8 + 20, 24, [12, 12, 20, 235], 5);
-      t.text(tip, inp.mouseX + 22, inp.mouseY - 18, 13, WHITE, 0, 0.5);
+    if (ws.cursor) this.stack(t, ws.cursor, inp.mouseX - size / 2, inp.mouseY - size / 2, size);
+    else if (tip) {
+      t.rect(inp.mouseX + 12, inp.mouseY - 32, tip.length * 8.2 + 20, 26, [42, 10, 90, 255]);
+      t.rect(inp.mouseX + 14, inp.mouseY - 30, tip.length * 8.2 + 16, 22, [16, 0, 32, 245]);
+      t.text(tip, inp.mouseX + 22, inp.mouseY - 19, 13, WHITE, 0, 0.5);
     }
     return clicked;
   }
 
   drawLoading(progress: number) {
     const ui = this.menu, w = this.w, h = this.h;
-    ui.rect(0, 0, w, h, [12, 14, 22, 255]);
+    ui.rect(0, 0, w, h, [27, 19, 12, 255]);
     ui.text('Generating world...', w / 2, h / 2 - 30, 22, WHITE, 0.5, 0.5);
-    ui.rect(w / 2 - 160, h / 2, 320, 14, [40, 44, 58, 255], 7);
-    ui.rect(w / 2 - 158, h / 2 + 2, 316 * progress, 10, [106, 170, 64, 255], 5);
+    ui.rect(w / 2 - 152, h / 2 - 2, 304, 14, [255, 255, 255, 255]);
+    ui.rect(w / 2 - 150, h / 2, 300, 10, [27, 19, 12, 255]);
+    ui.rect(w / 2 - 150, h / 2, 300 * progress, 10, [102, 204, 68, 255]);
   }
 }
