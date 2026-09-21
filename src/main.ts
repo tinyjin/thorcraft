@@ -12,6 +12,7 @@ import { Furnace, HOTBAR, Inventory, Stack, WindowState, makeStack, tickFurnace 
 import { clamp, lerp, smooth } from './math';
 import { RayHit, raycast } from './physics';
 import { EYE, Player } from './player';
+import { installCheats } from './cheats';
 import { Camera, Environment, HeldView, Renderer3D } from './renderer';
 import { texture } from './textures';
 import { BIOME_NAMES, Biome, SEA, WH, World } from './world';
@@ -628,13 +629,22 @@ async function boot() {
 
   if (params.has('autoplay')) startWorld(params.has('fresh') ? null : readSave(), params.get('autoplay') === 'creative');
 
-  (window as any).__game = {
-    get state() { return state; }, player, get inv() { return inv; }, r3d, cam, settings, input, get world() { return world; }, get entities() { return entities; },
-    setTime: (t: number) => { dayTime = t; }, setDay: (d: number) => { dayCount = d; }, setState: (s: State) => { state = s; }, open: (k: WindowKind) => openWindow(k),
-    give: (id: number, n = 1) => inv.add(id, n), win, furnaces: () => furnaces,
-    spawn: (kind: MobKind, dx: number, dz: number) => { const x = Math.floor(player.x + dx), z = Math.floor(player.z + dz); entities.mobs.push(new Mob(kind, x + 0.5, world.surfaceY(x, z), z + 0.5)); },
-    setCamera: (m: number) => { cameraMode = m; }, fx, worldScene, TVG, canvas, stats: () => ({ fps, frameAvg, ...r3d.stats }),
-  };
+  // Debug handles and console cheats exist in development only; production builds strip this block.
+  if (import.meta.env.DEV) {
+    (window as any).__game = {
+      get state() { return state; }, player, get inv() { return inv; }, r3d, cam, settings, input, get world() { return world; }, get entities() { return entities; },
+      setTime: (t: number) => { dayTime = t; }, setDay: (d: number) => { dayCount = d; }, setState: (s: State) => { state = s; }, open: (k: WindowKind) => openWindow(k),
+      give: (id: number, n = 1) => inv.add(id, n), win, furnaces: () => furnaces,
+      spawn: (kind: MobKind, dx: number, dz: number) => { const x = Math.floor(player.x + dx), z = Math.floor(player.z + dz); entities.mobs.push(new Mob(kind, x + 0.5, world.surfaceY(x, z), z + 0.5)); },
+      setCamera: (m: number) => { cameraMode = m; }, fx, worldScene, TVG, canvas, stats: () => ({ fps, frameAvg, ...r3d.stats }),
+    };
+    installCheats({
+      player, world: () => world, entities: () => entities, inv: () => inv,
+      getTime: () => dayTime, setTime: (t) => { dayTime = t; }, addDays: (n) => { dayCount += n; },
+      setCreative: (on) => { creative = on; player.creative = on; if (!on) player.flying = false; }, isCreative: () => creative,
+      seed: () => seedText, say,
+    });
+  }
   requestAnimationFrame(frame);
 }
 

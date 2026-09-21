@@ -245,6 +245,12 @@ export class EntityManager {
     this.hooks.sound('fuse');
   }
 
+  /** Primed TNT at an arbitrary position (not tied to a block). */
+  primeAt(x: number, y: number, z: number, fuse: number) {
+    this.tnts.push(new PrimedTNT(x, y, z, fuse));
+    this.hooks.sound('fuse');
+  }
+
   explode(x: number, y: number, z: number, power: number, player: Player) {
     const w = this.world;
     const r = Math.ceil(power);
