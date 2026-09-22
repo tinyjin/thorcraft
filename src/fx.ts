@@ -12,7 +12,7 @@ import { CS, World } from './world';
 const MAX_GLOWS = 28;
 const GLOW_DIST = 34;
 
-export interface PostState { menuOpen: boolean; underwater: boolean; inLava: boolean; hurt: number; night: number; dim: 'overworld' | 'ember' | 'void'; /** 0..1 while standing in a portal: the view melts before the jump. */ portal: number }
+export interface PostState { menuOpen: boolean; underwater: boolean; inLava: boolean; hurt: number; night: number; dim: 'overworld' | 'ember' | 'void'; /** 0..1 while standing in a portal: the view melts before the jump. */ portal: number; /** Rain strength 0..1: washes the colors out. */ rain: number }
 
 export type BillboardKind = 'alert' | 'fuse' | 'sparkle';
 const BILLBOARDS: Record<BillboardKind, { json: () => string; frames: number; loop: boolean; pool: number }> = {
@@ -30,7 +30,12 @@ export class Fx {
   readonly scene: any;
   private glows: any[] = [];
   private sunBloom: any; private flashShape: any;
-  private flash = 0;
+  private flash = 0; private flashTint: readonly [number, number, number] = [255, 236, 200];
+  /** Lightning glare at the point of impact. */
+  private strikeGlow: any; private strikeAt: [number, number, number] = [0, 0, 0]; private strikeAge = 9;
+  /** Rain on the lens: radial gradient discs that slide down the screen. */
+  private lens: { shape: any; x: number; y: number; r: number; age: number; life: number; vy: number }[] = [];
+  private lensTimer = 0;
   private blur = 0;
   private postKey = '';
   private candidates: number[] = [];
@@ -51,8 +56,18 @@ export class Fx {
       this.boards.set(kind, { anims, used: 0, last: new Array(def.pool).fill(-1) });
     }
     this.sunBloom = this.makeGlow([255, 236, 190]);
+    this.strikeGlow = this.makeGlow([210, 225, 255]);
     this.flashShape = new TVG.Shape();
     this.scene.add(this.flashShape);
+    for (let i = 0; i < 14; i++) {
+      const sh = new TVG.Shape();
+      const g = new TVG.RadialGradient(0, 0, 1);
+      // A drop on glass: bright rim, faint centre, a highlight off to one side.
+      g.addStop(0, [235, 245, 255, 6]).addStop(0.7, [225, 238, 255, 14]).addStop(0.86, [255, 255, 255, 110]).addStop(0.94, [255, 255, 255, 70]).addStop(1, [255, 255, 255, 0]);
+      sh.appendCircle(0, 0, 1, 1).fill(g).visible(false);
+      this.scene.add(sh);
+      this.lens.push({ shape: sh, x: 0, y: 0, r: 0, age: 0, life: 0, vy: 0 });
+    }
   }
 
   /** A unit radial gradient disc; placed each frame with translate + scale, faded with opacity. */
@@ -89,8 +104,34 @@ export class Fx {
 
   endBillboards() { for (const b of this.boards.values()) for (let i = b.used; i < b.anims.length; i++) b.anims[i].picture.visible(false); }
 
-  /** White flash, e.g. for explosions (0..1). */
-  burst(amount: number) { this.flash = Math.max(this.flash, amount); }
+  /** White flash, e.g. for explosions (0..1). Lightning passes a cold blue-white tint. */
+  burst(amount: number, tint: readonly [number, number, number] = [255, 236, 200]) { if (amount >= this.flash) this.flashTint = tint; this.flash = Math.max(this.flash, amount); }
+
+  /** Lightning struck at this world position: a glare sits on the impact point for a moment. */
+  strike(x: number, y: number, z: number) { this.strikeAt = [x, y, z]; this.strikeAge = 0; }
+
+  /**
+   * Rain drops landing on the camera lens. `exposure` is how much rain reaches the lens (0 under a roof or
+   * in third person), `up` 0..1 how far the view tilts toward the sky.
+   */
+  lensDrops(exposure: number, up: number, w: number, h: number, dt: number) {
+    if (!this.enabled) exposure = 0;
+    this.lensTimer -= dt;
+    if (exposure > 0.05 && this.lensTimer <= 0) {
+      this.lensTimer = (0.25 + Math.random() * 0.6) / (exposure * (0.4 + up * 1.6));
+      const d = this.lens.find((l) => l.life <= 0);
+      if (d) { d.x = Math.random() * w; d.y = Math.random() * h * 0.9; d.r = 4 + Math.random() * 9; d.age = 0; d.life = 1.8 + Math.random() * 2.2; d.vy = 6 + Math.random() * 30; }
+    }
+    for (const d of this.lens) {
+      if (d.life <= 0) { d.shape.visible(false); continue; }
+      d.age += dt;
+      if (d.age >= d.life) { d.life = 0; d.shape.visible(false); continue; }
+      // Grows a little as it lands, then runs down the glass, faster when large.
+      const t = d.age / d.life, grow = Math.min(1, d.age * 6), fade = t < 0.7 ? 1 : 1 - (t - 0.7) / 0.3;
+      d.y += d.vy * dt * (0.4 + d.r / 13);
+      d.shape.visible(true).scale(d.r * grow * (1 + t * 0.35)).translate(d.x, d.y).opacity(Math.floor(fade * 230));
+    }
+  }
 
   /** Blur and color grading of the whole 3D view. Only touches the scene when something changed. */
   post(st: PostState, dt: number) {
@@ -101,7 +142,8 @@ export class Fx {
     const hurt = Math.round(clamp(st.hurt * 190, 0, 60) / 6) * 6;
     const night = Math.round((st.night * 22) / 4) * 4;
     const portal = Math.round(st.portal * 10) * 8;
-    const key = `${sigma}|${st.underwater}|${st.inLava}|${hurt}|${night}|${st.dim}|${portal}`;
+    const rain = st.dim === 'overworld' && !st.underwater && !st.inLava ? Math.round(st.rain * 7) * 4 : 0; // up to 28: a wet, grey grade
+    const key = `${sigma}|${st.underwater}|${st.inLava}|${hurt}|${night}|${st.dim}|${portal}|${rain}`;
     if (key === this.postKey) return;
     this.postKey = key;
     const s = this.worldScene;
@@ -112,6 +154,7 @@ export class Fx {
       else if (st.dim === 'ember') s.tint(40, 4, 0, 255, 196, 150, 38); // everything glows like coals
       else if (st.dim === 'void') s.tint(10, 4, 40, 214, 226, 255, 30);
       else if (night > 0) s.tint(4, 6, 30, 205, 215, 255, night); // moonlit blue grade
+      if (rain > 0) s.tint(26, 30, 40, 208, 214, 224, rain); // rain drains the saturation
       if (portal > 0) s.tint(60, 10, 110, 235, 190, 255, portal);
       if (hurt > 0) s.tint(50, 0, 0, 255, 110, 110, hurt);
       if (sigma > 0) s.gaussianBlur(sigma, 0, 0, 50);
@@ -121,7 +164,7 @@ export class Fx {
   /** Soft halos around visible torches, glowstone and lit furnaces, a sun bloom and the explosion flash. */
   lights(world: World, cam: Camera, env: Environment, dt: number, active: boolean) {
     let used = 0;
-    const strength = 0.3 + 0.7 * env.night;
+    const strength = Math.min(1, 0.3 + 0.7 * env.night + env.overcast * 0.25); // lamps stand out more under a grey sky
     if (env.skyKind !== 'normal') env = { ...env, sunDir: [0, -1, 0] }; // no sun bloom without a sun
     if (active && this.enabled) {
       const ccx = Math.floor(cam.x / CS), ccz = Math.floor(cam.z / CS), cand = this.candidates;
@@ -174,15 +217,29 @@ export class Fx {
       const p = project(cam, cam.x + sd[0] * 100, cam.y + sd[1] * 100, cam.z + sd[2] * 100);
       if (p && p[0] > -200 && p[0] < cam.w + 200 && p[1] > -200 && p[1] < cam.h + 200 && !raycast(world, cam.x, cam.y, cam.z, sd[0], sd[1], sd[2], 48)) {
         const low = clamp(1 - sd[1] * 2.2, 0, 1); // stronger near the horizon
-        this.sunBloom.visible(true).scale(cam.focal * (0.45 + low * 0.35)).translate(p[0], p[1]).opacity(Math.floor(110 + low * 110));
-        bloom = true;
+        const clear = 1 - env.overcast;
+        if (clear > 0.02) { this.sunBloom.visible(true).scale(cam.focal * (0.45 + low * 0.35)).translate(p[0], p[1]).opacity(Math.floor((110 + low * 110) * clear)); bloom = true; }
       }
     }
     if (!bloom) this.sunBloom.visible(false);
 
+    // Lightning glare on the ground where it hit, fading over half a second.
+    this.strikeAge += dt;
+    let glare = false;
+    if (active && this.enabled && this.strikeAge < 0.5) {
+      const p = project(cam, this.strikeAt[0], this.strikeAt[1] + 0.5, this.strikeAt[2]);
+      if (p) {
+        const r = (cam.focal * 5) / Math.max(p[2], 1), a = 1 - this.strikeAge * 2;
+        this.strikeGlow.visible(true).scale(r).translate(p[0], p[1]).opacity(Math.floor(255 * a * (0.6 + 0.4 * Math.sin(this.strikeAge * 70))));
+        glare = true;
+      }
+    }
+    if (!glare) this.strikeGlow.visible(false);
+
     this.flash = Math.max(0, this.flash - dt * 2.2);
     this.flashShape.reset();
-    if (this.flash > 0.01) this.flashShape.appendRect(0, 0, cam.w, cam.h).fill(255, 236, 200, Math.floor(clamp(this.flash, 0, 1) * 200));
+    const ft = this.flashTint;
+    if (this.flash > 0.01) this.flashShape.appendRect(0, 0, cam.w, cam.h).fill(ft[0], ft[1], ft[2], Math.floor(clamp(this.flash, 0, 1) * 200));
   }
 }
 

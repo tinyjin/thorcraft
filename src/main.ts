@@ -21,6 +21,7 @@ import { EYE, Player } from './player';
 import { installCheats } from './cheats';
 import { Camera, Environment, HeldView, Renderer3D } from './renderer';
 import { texture } from './textures';
+import { Weather, WeatherHooks, WeatherSave } from './weather';
 import { BIOME_NAMES, Biome, Dim, SEA, WH, World } from './world';
 
 type State = 'title' | 'loading' | 'playing' | 'paused' | 'window' | 'dead' | 'ending';
@@ -33,7 +34,7 @@ interface SaveData {
   seedText: string; edits: Record<string, number[]>; creative: boolean; time: number; gems: number; collected: string[];
   spawn: [number, number]; days?: number;
   // Dimensions (optional so older saves keep loading)
-  dim?: Dim; editsEmber?: Record<string, number[]>; editsVoid?: Record<string, number[]>; links?: PortalLink[]; boss?: boolean; adv?: string[]; lost?: string[]; stats?: RunStats;
+  dim?: Dim; editsEmber?: Record<string, number[]>; editsVoid?: Record<string, number[]>; links?: PortalLink[]; boss?: boolean; adv?: string[]; lost?: string[]; stats?: RunStats; weather?: WeatherSave;
   player: { x: number; y: number; z: number; yaw: number; pitch: number; health: number };
   inv: (Stack | null)[]; selected: number; furnaces: Furnace[];
 }
@@ -84,6 +85,8 @@ async function boot() {
   const sfx = new Sfx();
   sfx.volume = settings.vol / 10;
   const r3d = new Renderer3D(TVG);
+  // Rain, snow and thunder; the software rasterizer gets fewer drops to draw.
+  const weather = new Weather(rendererName === 'sw' ? 160 : 420);
   const hud = new Hud(TVG, input, 'ui');
   // Sky, terrain and overlays share one scene so post effects (blur, tint) cover the whole 3D view.
   const worldScene = new TVG.Scene();
@@ -164,6 +167,29 @@ async function boot() {
   player.onHurt = () => { sfx.hurt(); shake = Math.max(shake, 0.35); };
   player.onSplash = () => sfx.splash();
 
+  const weatherHooks: WeatherHooks = {
+    thunder: (dist) => sfx.thunder(dist),
+    flash: (a) => fx.burst(a, [205, 218, 255]),
+    shake: (a) => { shake = Math.max(shake, a); },
+    strike: (x, y, z, radius) => {
+      fx.strike(x, y, z);
+      for (let i = 0; i < 26; i++) entities.particle(x, y + 0.3, z, (Math.random() - 0.5) * 9, Math.random() * 7, (Math.random() - 0.5) * 9, i % 3 ? [225, 235, 255] : [255, 240, 150], 0.7 + Math.random() * 0.5, 0.14, true);
+      if (state !== 'title' && !player.dead && Math.hypot(player.x - x, player.y - y, player.z - z) < radius) {
+        player.damage(5, true);
+        const dx = player.x - x, dz = player.z - z, l = Math.hypot(dx, dz) || 1;
+        player.vx += (dx / l) * 6; player.vz += (dz / l) * 6; player.vy = Math.max(player.vy, 5);
+      }
+      for (const m of entities.mobs) {
+        if (Math.hypot(m.x - x, m.y - y, m.z - z) >= radius) continue;
+        const dx = m.x - x, dz = m.z - z, l = Math.hypot(dx, dz) || 1;
+        m.damage(5, dx / l, dz / l, entities);
+        if (m.dead) stats.slain++;
+      }
+    },
+    splash: (x, y, z) => { if (entities.particles.length < 480) entities.particle(x, y + 0.03, z, (Math.random() - 0.5) * 0.8, 1 + Math.random() * 1.2, (Math.random() - 0.5) * 0.8, [175, 205, 240], 0.22, 0.05); },
+    drip: () => sfx.drip(),
+  };
+
   // ------------------------------------------------------------------ save / load
 
   const readSave = (): SaveData | null => {
@@ -174,7 +200,7 @@ async function boot() {
     if (!entities || state === 'title' || state === 'loading') return;
     const data: SaveData = {
       seedText, edits: (worlds.overworld ?? world).serializeEdits(), creative, time: dayTime, days: dayCount, gems, collected: [...collectedGems], spawn,
-      dim, editsEmber: worlds.ember?.serializeEdits() ?? pendingEdits.ember, editsVoid: worlds.void?.serializeEdits() ?? pendingEdits.void, links, boss: bossDefeated, adv: [...advancements], lost: [...lostVillagers], stats,
+      dim, editsEmber: worlds.ember?.serializeEdits() ?? pendingEdits.ember, editsVoid: worlds.void?.serializeEdits() ?? pendingEdits.void, links, boss: bossDefeated, adv: [...advancements], lost: [...lostVillagers], stats, weather: weather.save(),
       player: { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch, health: player.dead ? 20 : player.health },
       inv: inv.slots, selected: inv.selected, furnaces: [...furnaces.values()],
     };
@@ -228,6 +254,9 @@ async function boot() {
     for (const a of save?.collected ?? []) collectedGems.add(a);
     for (const a of save?.lost ?? []) lostVillagers.add(a);
     dim = save?.dim ?? 'overworld';
+    if (save?.weather) weather.load(save.weather); else weather.set('clear');
+    const wq = params.get('weather');
+    if (wq === 'clear' || wq === 'rain' || wq === 'thunder') { weather.set(wq); weather.strength = wq === 'clear' ? 0 : 1; weather.thunder = wq === 'thunder' ? 1 : 0; }
     world = getWorld(dim);
     newEntities();
     inv = new Inventory();
@@ -255,14 +284,17 @@ async function boot() {
 
   // A world to look at behind the title screen.
   const existing = readSave();
-  if (existing) { world = new World(hashString(existing.seedText)); world.loadEdits(existing.edits); }
+  if (existing) { world = new World(hashString(existing.seedText)); world.loadEdits(existing.edits); weather.load(existing.weather); }
   bindWorld(world);
   newEntities();
   const titleCenter: [number, number] = existing ? [existing.player.x, existing.player.z] : findSpawn(world);
 
   // ------------------------------------------------------------------ environment
 
-  const env: Environment = { sun: [1, 1, 1], fog: [176, 208, 245], zenith: [70, 130, 230], sunDir: [0, 1, 0], night: 0, moonPhase: 0, skyKind: 'normal', time: 0, underwater: false };
+  const env: Environment = {
+    sun: [1, 1, 1], fog: [176, 208, 245], zenith: [70, 130, 230], sunDir: [0, 1, 0], night: 0, moonPhase: 0, skyKind: 'normal', time: 0, underwater: false,
+    rain: 0, overcast: 0, thunder: 0, flash: 0, wind: [0, 0], fogNear: 1,
+  };
 
   const updateEnv = () => {
     const a = dayTime * Math.PI * 2;
@@ -277,6 +309,23 @@ async function boot() {
     env.fog = [lerp(lerp(14, 182, day), 250, dusk * 0.75), lerp(lerp(18, 212, day), 150, dusk * 0.7), lerp(lerp(38, 246, day), 96, dusk * 0.7)];
     env.sun = [lerp(0.2, 1, day) + dusk * 0.06, lerp(0.22, 1, day) - dusk * 0.06, lerp(0.36, 1, day) - dusk * 0.16];
     env.skyKind = state === 'title' || dim === 'overworld' ? 'normal' : dim;
+    env.rain = env.overcast = env.thunder = env.flash = 0; env.fogNear = 1; env.wind = weather.wind;
+    if (env.skyKind === 'normal') {
+      // Weather: the sky and fog go grey, the light drops (more so in a thunderstorm), the fog closes in.
+      const rain = weather.strength, storm = weather.thunder, gloom = rain * (0.55 + storm * 0.3);
+      env.rain = rain; env.overcast = weather.overcast; env.thunder = storm; env.flash = weather.flash;
+      env.fogNear = 1 - rain * 0.3 - storm * 0.15;
+      const gz: [number, number, number] = [lerp(10, 112, day), lerp(12, 120, day), lerp(20, 134, day)];
+      const gf: [number, number, number] = [lerp(14, 150, day), lerp(16, 158, day), lerp(24, 170, day)];
+      for (let i = 0; i < 3; i++) { env.zenith[i] = lerp(env.zenith[i], gz[i], gloom); env.fog[i] = lerp(env.fog[i], gf[i], gloom); }
+      env.sun = [env.sun[0] * (1 - gloom * 0.5), env.sun[1] * (1 - gloom * 0.48), env.sun[2] * (1 - gloom * 0.4)];
+      if (env.flash > 0) {
+        // Lightning: everything under the sky lights up cold white for a few frames.
+        const f = env.flash * 0.85;
+        env.sun = [env.sun[0] + f, env.sun[1] + f * 1.02, env.sun[2] + f * 1.1];
+        for (let i = 0; i < 3; i++) { env.zenith[i] = lerp(env.zenith[i], [205, 215, 255][i], f); env.fog[i] = lerp(env.fog[i], [215, 222, 255][i], f); }
+      }
+    }
     if (env.skyKind === 'ember') {
       // No sky at all: a dim red ambient, everything else comes from lava, magma and crystals.
       env.night = 1; env.zenith = [40, 10, 6]; env.fog = [96, 30, 14]; env.sun = [2.7, 1.55, 1.2];
@@ -772,6 +821,7 @@ async function boot() {
       player.update(world, input, dt, clock, playing);
       if (playing) interact(dt); else { mining.active = false; target = null; }
       if (playing) { stats.played += dt; stats.walked += Math.hypot(player.vx, player.vz) * dt; }
+      entities.rain = dim === 'overworld' ? weather.strength : 0; entities.thunder = dim === 'overworld' ? weather.thunder : 0;
       entities.update(dt, player, env.night);
       world.tick(dt);
       tickFurnaces(dt);
@@ -808,6 +858,8 @@ async function boot() {
       if (state === 'ending') cam.y += ending.lift;
     }
     cam.setup(W, H);
+    // Weather runs whenever the world does (and behind the title); the clocks tick in every dimension, drops fall only under the overworld sky.
+    if (sim || state === 'title') weather.update(dt, clock, world, cam, state === 'title' || dim === 'overworld', weatherHooks);
     updateEnv();
 
     // --- 3D scene (the credits cover it completely, so it rests while they roll)
@@ -818,6 +870,7 @@ async function boot() {
       r3d.drawSky(env);
       r3d.drawWorld(world);
       entities.draw(r3d, clock);
+      if (env.skyKind === 'normal' && !env.underwater) weather.draw(r3d, env.night, r3d.detail);
       if (state !== 'title') {
         if (cameraMode !== 0) {
           const amp = Math.min(0.9, Math.hypot(player.vx, player.vz) * 0.2) * (player.onGround ? 1 : 0.4);
@@ -840,7 +893,12 @@ async function boot() {
     }
     fx.endBillboards();
     fx.lights(world, cam, env, dt, state !== 'loading' && !covered);
-    fx.post({ menuOpen: state === 'paused' || state === 'window' || state === 'dead', underwater: env.underwater, inLava: player.inLava && state !== 'title', hurt: state === 'title' ? 0 : player.hurtTimer, night: env.night, dim: state === 'title' ? 'overworld' : dim, portal: state === 'ending' ? 1 : Math.min(1, portalTime / 2.2) }, dt);
+    fx.post({ menuOpen: state === 'paused' || state === 'window' || state === 'dead', underwater: env.underwater, inLava: player.inLava && state !== 'title', hurt: state === 'title' ? 0 : player.hurtTimer, night: env.night, dim: state === 'title' ? 'overworld' : dim, portal: state === 'ending' ? 1 : Math.min(1, portalTime / 2.2), rain: env.rain }, dt);
+    // Rain on the lens in first person, and the weather heard: patter (muffled under a roof), wind, or a snowy hiss.
+    const outdoors = env.skyKind === 'normal' && !env.underwater ? 1 - weather.sheltered : 0;
+    fx.lensDrops(playing && cameraMode === 0 && weather.localPrecip === 1 ? env.rain * outdoors : 0, clamp(player.pitch / 1.3, 0, 1), W, H, dt);
+    const windLevel = clamp(Math.hypot(env.wind[0], env.wind[1]) / 3.5, 0, 1);
+    sfx.ambience(env.skyKind === 'normal' ? env.rain : 0, env.skyKind === 'normal' ? windLevel : 0, env.underwater ? 1 : weather.sheltered, weather.localPrecip === 2);
 
     // --- HUD and menus
     toastTimer = Math.max(0, toastTimer - dt);
@@ -856,6 +914,7 @@ async function boot() {
         `xyz ${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}  view ${r3d.renderDistance}  ${dim === 'overworld' ? 'biome ' + BIOME_NAMES[t.biome] : dim}`,
         `mobs ${entities.mobs.length}  drops ${entities.drops.length}  particles ${entities.particles.length}`,
         `canvas ${W}x${H} @${canvas.dpr.toFixed(2)}  seed ${seedText}`,
+        weather.describe(),
         target ? `target ${BLOCKS[target.block].name} (${target.x}, ${target.y}, ${target.z})` : '',
       ];
     }
@@ -948,13 +1007,13 @@ async function boot() {
       setTime: (t: number) => { dayTime = t; }, setDay: (d: number) => { dayCount = d; }, setState: (s: State) => { state = s; }, open: (k: WindowKind) => openWindow(k),
       give: (id: number, n = 1) => inv.add(id, n), win, furnaces: () => furnaces,
       spawn: (kind: MobKind, dx: number, dz: number) => { const x = Math.floor(player.x + dx), z = Math.floor(player.z + dz); entities.mobs.push(new Mob(kind, x + 0.5, world.surfaceY(x, z), z + 0.5)); },
-      setCamera: (m: number) => { cameraMode = m; }, fx, l3d, worldScene, TVG, canvas, ending, stats: () => ({ fps, frameAvg, ...r3d.stats }),
+      setCamera: (m: number) => { cameraMode = m; }, fx, l3d, worldScene, TVG, canvas, ending, weather, stats: () => ({ fps, frameAvg, ...r3d.stats }),
     };
     installCheats({
       player, world: () => world, entities: () => entities, inv: () => inv,
       getTime: () => dayTime, setTime: (t) => { dayTime = t; }, addDays: (n) => { dayCount += n; },
       setCreative: (on) => { creative = on; player.creative = on; if (!on) player.flying = false; }, isCreative: () => creative,
-      seed: () => seedText, say, lottie: l3d, addGems: (n) => { gems = Math.max(0, gems + n); },
+      seed: () => seedText, say, lottie: l3d, addGems: (n) => { gems = Math.max(0, gems + n); }, weather,
       gotoDim: (d) => {
         if (d === dim) return;
         if (d === 'void') { dim = 'overworld'; enterVoidPortal(); }

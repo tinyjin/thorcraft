@@ -26,7 +26,7 @@ const LOD_DIST = [5, 11, 20, 31];
 const AO_DIST = 38;
 const PLANT_DIST = 36;
 const HAND_ORDER = 1023;
-const CLOUD_POOL = 14;
+const CLOUD_POOL = 22;
 /** Camera-space scratch size; bounds the vertex count of free-form polygons (Lottie outlines). */
 const SCRATCH = 256;
 export const MAX_POLY_VERTS = SCRATCH - 8;
@@ -65,6 +65,14 @@ export interface Environment {
   moonPhase: number;
   time: number; // seconds, for animation
   underwater: boolean;
+  /** Weather (overworld only). `rain` is the precipitation strength 0..1, `overcast` the cloud cover 0..1. */
+  rain: number; overcast: number;
+  /** 1 while a thunderstorm is active; `flash` lights the whole sky for a few frames after a lightning strike. */
+  thunder: number; flash: number;
+  /** Wind on the ground plane, blocks per second; carries the clouds and slants the rain. */
+  wind: [number, number];
+  /** Scales where the distance fog starts (1 = clear, smaller = storms close in). */
+  fogNear: number;
 }
 
 export interface RenderStats { polys: number; shapes: number; chunks: number; collectMs: number; emitMs: number }
@@ -114,6 +122,8 @@ export class Renderer3D {
   // SVG pictures
   private planetPic: any; private auroraPics: any[] = [];
   private sunPic: any; private moonPics: any[] = []; private cloudScene: any; private cloudPics: any[][] = []; private cloudKey = '';
+  /** Cloud layer offset, integrated from the wind. */
+  private cloudDrift = [0, 0]; private skyTime = -1;
   private outline: any;
 
   // Per-frame polygon store
@@ -175,8 +185,9 @@ export class Renderer3D {
   /** How 2D vector art enters the world: a camera facing card, or an extruded, layered cutout with a real orientation. */
   flatMode: 'extrude' | 'card' = 'extrude';
 
-  /** Camera yaw of the current frame. */
+  /** Camera yaw and position of the current frame. */
   get viewYaw() { return this.cam.yaw; }
+  get camX() { return this.cam.x; } get camY() { return this.cam.y; } get camZ() { return this.cam.z; }
 
   begin(cam: Camera, time: number) {
     this.cam = cam;
@@ -271,8 +282,11 @@ export class Renderer3D {
     return true;
   }
 
+  /** Set from `Environment.fogNear` each frame; storms pull the fog in without changing what gets drawn. */
+  fogNear = 1;
+
   private fogLevel(dist: number): number {
-    const R = this.renderDistance;
+    const R = this.renderDistance * this.fogNear;
     const t = clamp((dist - R * 0.58) / (R * 0.42), 0, 1);
     return Math.min(FOG_LEVELS - 1, Math.floor(t * t * FOG_LEVELS));
   }
@@ -741,6 +755,80 @@ export class Renderer3D {
   }
 
   /**
+   * Rain: a thin camera-facing quad from (x, y0, z) to (x + sx, y1, z + sz), the offset being the wind slant.
+   * Streaks go through the same depth buckets as everything else, so terrain hides them; within a bucket they
+   * share one sub key and one color and so collapse into a single shape per bucket.
+   */
+  drawStreak(x: number, y0: number, z: number, sx: number, y1: number, sz: number, width: number, color: number) {
+    const cam = this.cam;
+    const dist = Math.hypot(x - cam.x, y0 - cam.y, z - cam.z);
+    if (dist > this.renderDistance || dist < 0.9) return; // a drop grazing the lens would fill the screen
+    const h = width / 2, rx = cam.cosY * h, rz = -cam.sinY * h;
+    const tx = this.tx, ty = this.ty, tz = this.tz;
+    tx[0] = x + sx - rx; ty[0] = y1; tz[0] = z + sz - rz;
+    tx[1] = x + sx + rx; ty[1] = y1; tz[1] = z + sz + rz;
+    tx[2] = x + rx; ty[2] = y0; tz[2] = z + rz;
+    tx[3] = x - rx; ty[3] = y0; tz[3] = z - rz;
+    this.toCamera(4);
+    const bucket = Math.min(MAX_BUCKET, Math.abs(Math.floor(x) - this.camCell[0]) + Math.abs(Math.floor(y0) - this.camCell[1]) + Math.abs(Math.floor(z) - this.camCell[2]));
+    this.pushPoly(4, (MAX_BUCKET - bucket) * 4 + Layer.ENTITY, 32768, this.fogLevel(dist), color, 0);
+  }
+
+  /** Snow: a camera-facing square with a shared color, batched per bucket like the rain streaks. */
+  drawFlake(x: number, y: number, z: number, size: number, color: number) {
+    const cam = this.cam;
+    this.tx[0] = x; this.ty[0] = y; this.tz[0] = z;
+    this.toCamera(1);
+    const zc = this.czs[0];
+    if (zc < NEAR * 2) return;
+    const dist = Math.hypot(x - cam.x, y - cam.y, z - cam.z);
+    if (dist > this.renderDistance || dist < 0.6) return;
+    const xc = this.cxs[0], yc = this.cys[0], h = size / 2;
+    this.cxs[0] = xc - h; this.cys[0] = yc + h; this.czs[0] = zc;
+    this.cxs[1] = xc + h; this.cys[1] = yc + h; this.czs[1] = zc;
+    this.cxs[2] = xc + h; this.cys[2] = yc - h; this.czs[2] = zc;
+    this.cxs[3] = xc - h; this.cys[3] = yc - h; this.czs[3] = zc;
+    const bucket = Math.min(MAX_BUCKET, Math.abs(Math.floor(x) - this.camCell[0]) + Math.abs(Math.floor(y) - this.camCell[1]) + Math.abs(Math.floor(z) - this.camCell[2]));
+    this.pushPoly(4, (MAX_BUCKET - bucket) * 4 + Layer.ENTITY, 32768, this.fogLevel(dist), color, 0);
+  }
+
+  /**
+   * A lightning bolt: a jagged polyline from the cloud layer down to (x, y, z), projected through the terrain
+   * pipeline as a chain of thin quads so hills and walls hide it. Drawn twice, a wide faint halo and a bright core,
+   * with a fork that dies out in the air. `age` is seconds since the strike.
+   */
+  drawBolt(x: number, y: number, z: number, seed: number, age: number) {
+    const cam = this.cam;
+    if (Math.hypot(x - cam.x, z - cam.z) > this.renderDistance * 1.6) return;
+    const top = WH + 30, segs = 14;
+    const fade = clamp(1 - age * 2.6, 0, 1);
+    const flick = age < 0.06 ? 1 : 0.55 + 0.45 * Math.sin(age * 90 + seed);
+    const alpha = fade * flick;
+    if (alpha <= 0.02) return;
+    const core = palette.id(255, 255, 255, Math.floor(alpha * 255), 0, 3), halo = palette.id(180, 200, 255, Math.floor(alpha * 90), 0, 3);
+    for (const [w, col] of [[1.6, halo], [0.35, core]] as const) {
+      const g = mulberry32(seed); // both passes trace the same path
+      let px = x, pz = z, py = top;
+      const branchAt = 4 + Math.floor(g() * 5);
+      for (let i = 1; i <= segs; i++) {
+        const t = i / segs, ny = top + (y - top) * t;
+        const nx = x + (g() - 0.5) * 6 * (1 - t * 0.7), nz = z + (g() - 0.5) * 6 * (1 - t * 0.7);
+        this.drawStreak(px, py, pz, nx - px, ny, nz - pz, w, col);
+        if (i === branchAt) {
+          let fx = px, fz = pz, fy = py;
+          const dxf = (g() - 0.5) * 8, dzf = (g() - 0.5) * 8;
+          for (let k = 1; k <= 5; k++) {
+            const gx = px + dxf * (k / 5) + (g() - 0.5) * 2, gz = pz + dzf * (k / 5) + (g() - 0.5) * 2, gy = py - k * 3.5;
+            this.drawStreak(fx, fy, fz, gx - fx, gy, gz - fz, w * 0.6, col);
+            fx = gx; fz = gz; fy = gy;
+          }
+        }
+        px = nx; pz = nz; py = ny;
+      }
+    }
+  }
+
+  /**
    * First person hand. Geometry is built directly in camera space (x right, y up, z forward)
    * and drawn above everything else.
    */
@@ -933,7 +1021,8 @@ export class Renderer3D {
 
     // Stars
     this.starShape.reset();
-    if (env.night > 0.25) {
+    const clear = 1 - env.overcast;
+    if (env.night > 0.25 && clear > 0.02) {
       const rot = env.time * 0.004, sr = Math.sin(rot), cr = Math.cos(rot);
       for (let i = 0; i < this.stars.length; i += 4) {
         const sx = this.stars[i] * cr - this.stars[i + 1] * sr, sy = this.stars[i] * sr + this.stars[i + 1] * cr;
@@ -943,7 +1032,7 @@ export class Renderer3D {
         const s = this.stars[i + 3];
         this.starShape.appendRect(p[0] - s / 2, p[1] - s / 2, s, s);
       }
-      this.starShape.fill(255, 255, 240, Math.floor(clamp((env.night - 0.25) * 1.6, 0, 1) * 230));
+      this.starShape.fill(255, 255, 240, Math.floor(clamp((env.night - 0.25) * 1.6, 0, 1) * 230 * clear));
     }
 
     // The Void: a ringed planet and drifting aurora bands, all SVG pictures placed by direction.
@@ -967,37 +1056,45 @@ export class Renderer3D {
     const sd = env.sunDir;
     const sun = this.projectDir(sd[0], sd[1], sd[2]);
     this.sunGlow.reset();
-    const sunUp = openSky && !!sun && sd[1] > -0.12;
+    // Overcast skies hide the sun and moon behind the cloud deck; a faint bright patch remains where the sun is.
+    const sunUp = openSky && !!sun && sd[1] > -0.12 && clear > 0.02;
     if (sunUp) {
       const s = c.focal * 0.2;
       const glow = new TVG.RadialGradient(sun![0], sun![1], s * 1.9);
-      glow.addStop(0, [255, 236, 170, 150]).addStop(1, [255, 220, 150, 0]);
+      glow.addStop(0, [255, 236, 170, Math.floor(150 * (0.35 + 0.65 * clear))]).addStop(1, [255, 220, 150, 0]);
       this.sunGlow.appendCircle(sun![0], sun![1], s * 1.9, s * 1.9).fill(glow);
-      this.sunPic.size(s, s).translate(sun![0] - s / 2, sun![1] - s / 2);
+      this.sunPic.size(s, s).translate(sun![0] - s / 2, sun![1] - s / 2).opacity(Math.floor(255 * clear));
     }
     this.sunPic.visible(sunUp);
     const moon = this.projectDir(-sd[0], -sd[1], -sd[2]);
-    const moonUp = openSky && !!moon && -sd[1] > -0.12;
+    const moonUp = openSky && !!moon && -sd[1] > -0.12 && clear > 0.02;
     for (let i = 0; i < MOON_PHASES; i++) this.moonPics[i].visible(moonUp && i === env.moonPhase);
-    if (moonUp) { const s = c.focal * 0.17; this.moonPics[env.moonPhase].size(s, s).translate(moon![0] - s / 2, moon![1] - s / 2); }
+    if (moonUp) { const s = c.focal * 0.17; this.moonPics[env.moonPhase].size(s, s).translate(moon![0] - s / 2, moon![1] - s / 2).opacity(Math.floor(255 * clear)); }
 
     // Cloud layer: SVG pictures scattered on a drifting grid high above the world, scaled by depth.
-    const CY = WH + 34, cell = 56, reach = 5, maxD = cell * (reach + 0.5);
+    // Storm clouds hang lower, cover more of the grid and grow; the whole deck rides the wind.
+    const CY = WH + 34 - env.overcast * 12, cell = 56, reach = 5, maxD = cell * (reach + 0.5);
     const used = [0, 0, 0];
+    if (this.skyTime >= 0) {
+      const dtc = clamp(env.time - this.skyTime, 0, 0.1);
+      this.cloudDrift[0] += (1.1 + env.wind[0] * 2.5) * dtc; this.cloudDrift[1] += env.wind[1] * 2.5 * dtc;
+    }
+    this.skyTime = env.time;
     if (openSky && c.y < CY - 2) {
-      const drift = env.time * 1.1;
-      const bx = Math.floor((c.x - drift) / cell), bz = Math.floor(c.z / cell);
+      const driftX = this.cloudDrift[0], driftZ = this.cloudDrift[1];
+      const bx = Math.floor((c.x - driftX) / cell), bz = Math.floor((c.z - driftZ) / cell);
+      const cover = 0.42 + env.overcast * 0.5;
       for (let gz = -reach; gz <= reach; gz++) for (let gx = -reach; gx <= reach; gx++) {
         const ix = bx + gx, iz = bz + gz, hsh = cloudHash(ix, iz);
-        if (hsh > 0.42) continue;
+        if (hsh > cover) continue;
         const variant = Math.floor(hsh * 1000) % CLOUD_VARIANTS;
         if (used[variant] >= CLOUD_POOL) continue;
-        const wx = (ix + 0.5 + (hsh * 7 % 1 - 0.5) * 0.6) * cell + drift, wz = (iz + 0.5 + (hsh * 13 % 1 - 0.5) * 0.6) * cell;
+        const wx = (ix + 0.5 + (hsh * 7 % 1 - 0.5) * 0.6) * cell + driftX, wz = (iz + 0.5 + (hsh * 13 % 1 - 0.5) * 0.6) * cell + driftZ;
         const hd = Math.hypot(wx - c.x, wz - c.z);
         if (hd > maxD) continue;
         const p = this.projectDir(wx - c.x, CY - c.y, wz - c.z);
         if (!p || p[2] < 6) continue;
-        const w = (c.focal * (52 + hsh * 90)) / p[2], h = w * 0.4;
+        const w = (c.focal * (52 + hsh * 90) * (1 + env.overcast * 0.45)) / p[2], h = w * 0.4;
         if (p[0] + w < 0 || p[0] - w > c.w || p[1] + h < 0 || p[1] - h > c.h) continue;
         const pic = this.cloudPics[variant][used[variant]++];
         pic.visible(true).size(w, h).translate(p[0] - w / 2, p[1] - h / 2).opacity(Math.floor(235 * clamp(1.5 - (hd / maxD) * 1.5, 0, 1)));
@@ -1005,8 +1102,9 @@ export class Renderer3D {
     }
     for (let v = 0; v < CLOUD_VARIANTS; v++) for (let i = used[v]; i < CLOUD_POOL; i++) this.cloudPics[v][i].visible(false);
     // Recolor the clouds with a tint effect: warm at dusk, dark blue at night. Only when the (quantized) color changes.
+    // Rain clouds turn a heavy grey, thunderheads darker still; a lightning flash lights them from inside.
     const q = (x: number) => Math.round(x / 12) * 12;
-    const l = 1 - env.night * 0.72;
+    const l = (1 - env.night * 0.72) * (1 - env.overcast * 0.42 - env.thunder * 0.16) + env.flash * 0.6;
     const wr = q((255 * 0.7 + env.fog[0] * 0.3) * l), wg = q((255 * 0.7 + env.fog[1] * 0.3) * l), wb = q((255 * 0.72 + env.fog[2] * 0.28) * Math.min(1, l + 0.1));
     const key = wr + ',' + wg + ',' + wb;
     if (key !== this.cloudKey) {

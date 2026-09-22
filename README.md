@@ -27,7 +27,7 @@ npm run dev        # http://localhost:5188
 In the item windows: LMB picks up / puts down / swaps, RMB splits a stack or places one item, Shift + click moves a stack.
 
 URL parameters: `renderer=gl|wg|sw`, `seed=abc`, `dist=64` (fixed view distance),
-`autoplay=creative|survival`, `fresh` (ignore the save), `debug`.
+`autoplay=creative|survival`, `fresh` (ignore the save), `debug`, `weather=clear|rain|thunder` (start in that weather).
 
 ## What is in the game
 
@@ -40,6 +40,18 @@ URL parameters: `renderer=gl|wg|sw`, `seed=abc`, `dist=64` (fixed view distance)
 - Mobs with box models and walk cycles: pigs, cows, sheep, zombies that burn at dawn, creepers that blow up
 - Block physics: falling sand and gravel, spreading water, plants and torches popping off, TNT chain reactions
 - Day/night cycle with gradient sky, sun, moon, stars, clouds, sunset tint and distance fog
+- Weather (`src/weather.ts`), scheduled like Minecraft's: independent rain and thunder clocks, long clear spells,
+  showers of a few minutes, thunderstorms inside them. Rain eases in and out: the clouds thicken, sink and turn
+  grey, the sun and moon fade behind them, the light and fog go dull and the view desaturates. What falls depends on
+  the biome under every drop: snow in the taiga and on the peaks (grass gets its snow cover and shore water freezes
+  while it snows), nothing over the desert, rain elsewhere. Drops are thin camera facing quads sent through the same
+  depth buckets as blocks, so roofs, trees and hills hide them; under a roof you hear the rain muffled, with drips
+  from the eaves, and in first person drops land on the lens. Wind (gusty, stronger in storms) carries the clouds,
+  slants the rain and drifts the snow. Thunderstorms strike lightning near the player: a forked bolt drawn in the
+  world, a cold flash over sky and terrain, a glare on the impact point, thunder that arrives late from far off and
+  cracks when close, and damage to whatever stood there. Zombies do not burn under rain clouds, hostile mobs come
+  out by day in a thunderstorm, villagers go indoors. Synthesized ambience throughout: rain patter, wind with a
+  wandering pitch, a snowy hiss. Weather persists in the save; `/weather`, `/toggledownfall`
 - First person hand with the held block or item, third person avatar, particles, item drops, collectible gems,
   minimap, synthesized per-material sound
 - ThorVG showcase: scene post effects (pause blur, underwater / lava / night / hurt tint), light halos with voxel

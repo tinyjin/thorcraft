@@ -137,7 +137,8 @@ export class Mob implements Body {
     const dist = Math.hypot(dx, dz);
 
     if (FLYING.has(this.kind)) { this.updateFlying(world, player, dt, em); return; }
-    if (this.kind === 'villager') speed = this.villagerBrain(player, night, dist, speed);
+    // Villagers head indoors at night and when it rains.
+    if (this.kind === 'villager') speed = this.villagerBrain(player, Math.max(night, em.rain * 0.75), dist, speed);
     if (this.kind === 'glitch') this.glitchBrain(world, player, dt, dist, em);
 
     const hunting = info.hostile && !player.creative && !player.dead && dist < 24 && Math.abs(dy) < 8 && (this.kind !== 'glitch' || this.angry);
@@ -171,8 +172,8 @@ export class Mob implements Body {
       }
     }
 
-    // Zombies burn under the open daytime sky.
-    if (info.hostile && night < 0.3 && this.y + this.h > world.topAt(Math.floor(this.x), Math.floor(this.z)) && !this.inWater) {
+    // Zombies burn under the open daytime sky, unless rain clouds cover it.
+    if (info.hostile && night < 0.3 && em.rain < 0.5 && this.y + this.h > world.topAt(Math.floor(this.x), Math.floor(this.z)) && !this.inWater) {
       this.burnTimer += dt;
       if (Math.random() < dt * 14) em.particle(this.x + (Math.random() - 0.5) * 0.5, this.y + Math.random() * 1.8, this.z + (Math.random() - 0.5) * 0.5, 0, 1.5, 0, [255, 150 + Math.random() * 80, 40], 0.5, 0.12, true);
       if (this.burnTimer > 1) { this.burnTimer = 0; this.damage(3, 0, 0, em); }
@@ -342,6 +343,8 @@ export class EntityManager {
   lottie: Lottie3D | null = null;
   private spawnTimer = 2;
   private gemScan = 0;
+  /** Set by the game each frame: rain strength and thunderstorm level 0..1 (overworld). */
+  rain = 0; thunder = 0;
 
   constructor(private world: World, readonly hooks: EntityHooks) {}
 
@@ -495,7 +498,9 @@ export class EntityManager {
     const w = this.world;
     if (w.dim === 'ember') { this.spawnEmber(player); return; }
     if (w.dim === 'void') { this.spawnVoid(player); return; }
-    const hostile = night > 0.6 && !player.creative && Math.random() < 0.65;
+    // A thunderstorm darkens the sky enough for hostile mobs to come out in daytime.
+    const dark = night > 0.6 || (this.thunder > 0.5 && this.rain > 0.5);
+    const hostile = dark && !player.creative && Math.random() < 0.65;
     const cap = hostile ? 10 : 12;
     const count = this.mobs.filter((m) => MOB_INFO[m.kind].hostile === hostile && m.kind !== 'villager').length;
     if (count >= cap) return;
