@@ -3,6 +3,7 @@
 export class Input {
   keys = new Set<string>();
   pressed = new Set<string>(); // keys that went down this frame
+  released = new Set<string>(); // keys that went up this frame
   mouseDX = 0; mouseDY = 0;
   mouseX = 0; mouseY = 0;
   buttons = [false, false, false];
@@ -21,7 +22,7 @@ export class Input {
       if (e.ctrlKey && this.locked) e.preventDefault();
       this.keys.add(e.code);
     });
-    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
+    window.addEventListener('keyup', (e) => { this.keys.delete(e.code); this.released.add(e.code); });
     window.addEventListener('blur', () => { this.keys.clear(); this.buttons.fill(false); });
     el.addEventListener('mousemove', (e) => {
       if (this.locked) { this.mouseDX += e.movementX; this.mouseDY += e.movementY; }
@@ -51,6 +52,7 @@ export class Input {
 
   endFrame() {
     this.pressed.clear();
+    this.released.clear();
     this.clicked.fill(false);
     this.mouseDX = 0; this.mouseDY = 0; this.wheel = 0; this.typed = '';
   }

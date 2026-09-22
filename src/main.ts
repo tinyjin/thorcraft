@@ -129,6 +129,8 @@ async function boot() {
   let breakCd = 0, useCd = 0, attackCd = 0;
   let frameAvg = 16, qualityTimer = 0;
   let saveTimer = 0, pausedAt = 0;
+  let escArmed = false; // Escape went down while paused; resume when it comes back up
+  const pause = () => { state = 'paused'; pausedAt = clock; escArmed = false; input.unlock(); writeSave(); };
   let loadFrames = 0;
   let fps = 60, fpsAcc = 0, fpsFrames = 0;
   let heldId = -1, handDrop = 0;
@@ -710,7 +712,7 @@ async function boot() {
       if (input.pressed.has('F5') || input.pressed.has('KeyV')) cameraMode = (cameraMode + 1) % 3;
       if (input.pressed.has('KeyM')) showMap = !showMap;
       if (input.pressed.has('KeyT') && (creative || debug)) { dayTime = (dayTime + 0.125) % 1; say('Time skipped'); }
-      if (input.pressed.has('KeyP') || (input.pressed.has('Escape') && !input.locked)) { state = 'paused'; pausedAt = clock; input.unlock(); writeSave(); }
+      if (input.pressed.has('KeyP') || (input.pressed.has('Escape') && !input.locked)) pause();
       for (let i = 0; i < HOTBAR; i++) if (input.pressed.has('Digit' + (i + 1))) { inv.selected = i; nameTimer = 2; }
       if (input.wheel) { inv.selected = (inv.selected + Math.sign(input.wheel) + HOTBAR) % HOTBAR; nameTimer = 2; }
       if (input.clicked[0] && !input.locked && !params.has('autoplay')) { input.lock(); input.clicked[0] = false; }
@@ -853,8 +855,11 @@ async function boot() {
       else if (act === 'auto') { settings.auto = !settings.auto; saveSettings(); }
       else if (act === 'mode') { creative = !creative; player.creative = creative; if (!creative) player.flying = false; }
       else if (act === 'quit') { writeSave(); location.reload(); }
-      // Ignore the very Escape press that released the pointer lock.
-      if (clock - pausedAt > 0.3 && (input.pressed.has('Escape') || input.pressed.has('KeyP'))) { state = 'playing'; input.lock(); }
+      // Ignore the very Escape press that released the pointer lock, and resume on Escape *release*:
+      // re-requesting the lock while the key is still held lets the browser's own Escape
+      // handling (key repeat / hold) drop the lock again, which would bounce us back to pause.
+      if (clock - pausedAt > 0.3 && input.pressed.has('Escape')) escArmed = true;
+      if ((escArmed && input.released.has('Escape')) || input.pressed.has('KeyP')) { state = 'playing'; escArmed = false; input.lock(); }
     } else if (state === 'window') {
       if (winKind === 'trade') {
         const job = (tradeMob?.job || 'farmer') as keyof typeof TRADES;
@@ -891,7 +896,7 @@ async function boot() {
   };
 
   input.onLockChange = (locked) => {
-    if (!locked && state === 'playing' && !params.has('autoplay')) { state = 'paused'; pausedAt = clock; writeSave(); }
+    if (!locked && state === 'playing' && !params.has('autoplay')) pause();
   };
   document.addEventListener('visibilitychange', () => { if (document.hidden) writeSave(); });
   window.addEventListener('beforeunload', () => writeSave());
