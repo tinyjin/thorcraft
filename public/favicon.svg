@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- ThorCraft: an isometric grass block -->
+  <polygon points="32,6 58,19 32,32 6,19" fill="#7cc44a"/>
+  <polygon points="26,14 32,17 26,20 20,17" fill="#60a83a"/>
+  <polygon points="40,20 46,23 40,26 34,23" fill="#60a83a"/>
+  <polygon points="6,19 32,32 32,60 6,47" fill="#86603a"/>
+  <polygon points="32,32 58,19 58,47 32,60" fill="#684a2c"/>
+  <polygon points="6,19 32,32 32,38 6,25" fill="#66a03c"/>
+  <polygon points="32,32 58,19 58,25 32,38" fill="#568a32"/>
+</svg>

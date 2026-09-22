@@ -1,5 +1,9 @@
 # ThorCraft
 
+[![ThorCraft](public/thorcraft-hero.png)](https://thorcraft.vercel.app)
+
+**Play: [thorcraft.vercel.app](https://thorcraft.vercel.app)**
+
 A voxel sandbox where world is drawn by [`@thorvg/webcanvas`](../thorvg.web/packages/webcanvas), a light-weight engine.
 
 ```bash
