@@ -22,7 +22,7 @@ npm run dev        # http://localhost:5188
 | RMB on a crafting table / furnace | 3x3 crafting, smelting |
 | F5 or V | first person, third person back, third person front |
 | Double Space or F | toggle flying (creative), Shift / C to descend |
-| M, F3, Esc / P | minimap, debug overlay, pause (view distance, FOV, sensitivity, volume, game mode) |
+| M, F3, Esc / P | minimap, debug overlay, pause (view distance, FOV, sensitivity, sound and music volume, game mode) |
 
 In the item windows: LMB picks up / puts down / swaps, RMB splits a stack or places one item, Shift + click moves a stack.
 
@@ -52,6 +52,14 @@ URL parameters: `renderer=gl|wg|sw`, `seed=abc`, `dist=64` (fixed view distance)
   cracks when close, and damage to whatever stood there. Zombies do not burn under rain clouds, hostile mobs come
   out by day in a thunderstorm, villagers go indoors. Synthesized ambience throughout: rain patter, wind with a
   wandering pitch, a snowy hiss. Weather persists in the save; `/weather`, `/toggledownfall`
+- Music (`src/music.ts`), composed in code and played by a WebAudio sequencer, no audio files. Six pieces named
+  after the game's lore: Vector Dawn (title), Stroke and Fill (overworld days), Wireframe Night (nights and rain),
+  Ember Depths (a slow drone with a distant drum) and The Outline (bells over drifting chords, for the Void). Like
+  Minecraft it plays a track, then falls silent for minutes before drawing the next from the pool that fits; a
+  change of dimension fades the music out and a fitting piece follows soon after, while day turning to night never
+  cuts a track short. Instruments are synthesized (a hammered piano, glassy bells, a detuned pad, a round bass, a
+  low pulse) through a generated convolution hall; every performance is lightly humanized. A "Now playing" toast
+  names the track; the pause menu has a music volume; `/music play|stop|list|<track>`
 - First person hand with the held block or item, third person avatar, particles, item drops, collectible gems,
   minimap, synthesized per-material sound
 - ThorVG showcase: scene post effects (pause blur, underwater / lava / night / hurt tint), light halos with voxel
@@ -81,5 +89,5 @@ URL parameters: `renderer=gl|wg|sw`, `seed=abc`, `dist=64` (fixed view distance)
   themselves with trim paths. Then the credits roll: the gradient logo, the cast as live Lottie animations, every
   engine feature that drew the world, and the stats of your run (days, blocks mined and placed, mobs slain, deaths,
   distance, dimensions, advancements). Hold Space to hurry, Esc to skip; the credits end with the way back to spawn
-- Advancement toasts; dev cheats: `/dim`, `/locate village|stronghold`, `/gems`, `/summon cinder|ashling|glitch|outline`, `/ending`
+- Advancement toasts; dev cheats: `/dim`, `/locate village|stronghold`, `/gems`, `/summon cinder|ashling|glitch|outline`, `/ending`, `/weather`, `/music`
 - World edits, inventory, furnaces and player state persist in `localStorage`

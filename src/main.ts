@@ -21,6 +21,7 @@ import { EYE, Player } from './player';
 import { installCheats } from './cheats';
 import { Camera, Environment, HeldView, Renderer3D } from './renderer';
 import { texture } from './textures';
+import { Music, MusicContext } from './music';
 import { Weather, WeatherHooks, WeatherSave } from './weather';
 import { BIOME_NAMES, Biome, Dim, SEA, WH, World } from './world';
 
@@ -77,13 +78,15 @@ async function boot() {
   const el = document.querySelector<HTMLCanvasElement>('#game')!;
   document.getElementById('boot')?.remove();
 
-  const settings: Settings = { renderDist: rendererName === 'sw' ? 2 : 4, fov: 75, sens: 10, vol: 5, auto: true };
+  const settings: Settings = { renderDist: rendererName === 'sw' ? 2 : 4, fov: 75, sens: 10, vol: 5, music: 6, auto: true };
   try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch { /* ignore */ }
   const saveSettings = () => { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* ignore */ } };
 
   const input = new Input(el);
   const sfx = new Sfx();
   sfx.volume = settings.vol / 10;
+  const music = new Music(sfx);
+  music.volume = settings.music / 10;
   const r3d = new Renderer3D(TVG);
   // Rain, snow and thunder; the software rasterizer gets fewer drops to draw.
   const weather = new Weather(rendererName === 'sw' ? 160 : 420);
@@ -151,6 +154,7 @@ async function boot() {
   if (fixedDist) settings.auto = false;
 
   const say = (msg: string) => { toast = msg; toastTimer = 3; };
+  music.onPlay = (name) => { if (state !== 'title') say(`Now playing: ${name}`); };
   const fkey = (x: number, y: number, z: number) => `${dim}:${x},${y},${z}`;
   const advance = (id: string) => { if (advancements.has(id)) return; advancements.add(id); say(`Advancement: ${ADV[id]}`); sfx.gem(); };
 
@@ -899,6 +903,9 @@ async function boot() {
     fx.lensDrops(playing && cameraMode === 0 && weather.localPrecip === 1 ? env.rain * outdoors : 0, clamp(player.pitch / 1.3, 0, 1), W, H, dt);
     const windLevel = clamp(Math.hypot(env.wind[0], env.wind[1]) / 3.5, 0, 1);
     sfx.ambience(env.skyKind === 'normal' ? env.rain : 0, env.skyKind === 'normal' ? windLevel : 0, env.underwater ? 1 : weather.sheltered, weather.localPrecip === 2);
+    // Background music: the pool follows the title, the dimension, the daylight and the weather.
+    const musicCtx: MusicContext = state === 'ending' || state === 'loading' ? 'none' : state === 'title' ? 'title' : dim === 'ember' ? 'ember' : dim === 'void' ? 'void' : env.night > 0.5 ? 'night' : weather.strength > 0.5 ? 'rain' : 'day';
+    music.update(musicCtx);
 
     // --- HUD and menus
     toastTimer = Math.max(0, toastTimer - dt);
@@ -914,7 +921,7 @@ async function boot() {
         `xyz ${player.x.toFixed(1)} ${player.y.toFixed(1)} ${player.z.toFixed(1)}  view ${r3d.renderDistance}  ${dim === 'overworld' ? 'biome ' + BIOME_NAMES[t.biome] : dim}`,
         `mobs ${entities.mobs.length}  drops ${entities.drops.length}  particles ${entities.particles.length}`,
         `canvas ${W}x${H} @${canvas.dpr.toFixed(2)}  seed ${seedText}`,
-        weather.describe(),
+        weather.describe() + (music.playing ? `  music: ${music.playing}` : ''),
         target ? `target ${BLOCKS[target.block].name} (${target.x}, ${target.y}, ${target.z})` : '',
       ];
     }
@@ -945,7 +952,7 @@ async function boot() {
       const act = hud.drawPause(settings, creative);
       if (act && act !== 'settings') sfx.click();
       if (act === 'resume') { state = 'playing'; input.lock(); }
-      else if (act === 'settings') { sfx.volume = settings.vol / 10; if (!fixedDist) r3d.renderDistance = settings.renderDist * 16; saveSettings(); }
+      else if (act === 'settings') { sfx.volume = settings.vol / 10; music.volume = settings.music / 10; if (!fixedDist) r3d.renderDistance = settings.renderDist * 16; saveSettings(); }
       else if (act === 'auto') { settings.auto = !settings.auto; saveSettings(); }
       else if (act === 'mode') { creative = !creative; player.creative = creative; if (!creative) player.flying = false; }
       else if (act === 'quit') { writeSave(); location.reload(); }
@@ -1007,13 +1014,13 @@ async function boot() {
       setTime: (t: number) => { dayTime = t; }, setDay: (d: number) => { dayCount = d; }, setState: (s: State) => { state = s; }, open: (k: WindowKind) => openWindow(k),
       give: (id: number, n = 1) => inv.add(id, n), win, furnaces: () => furnaces,
       spawn: (kind: MobKind, dx: number, dz: number) => { const x = Math.floor(player.x + dx), z = Math.floor(player.z + dz); entities.mobs.push(new Mob(kind, x + 0.5, world.surfaceY(x, z), z + 0.5)); },
-      setCamera: (m: number) => { cameraMode = m; }, fx, l3d, worldScene, TVG, canvas, ending, weather, stats: () => ({ fps, frameAvg, ...r3d.stats }),
+      setCamera: (m: number) => { cameraMode = m; }, fx, l3d, worldScene, TVG, canvas, ending, weather, music, stats: () => ({ fps, frameAvg, ...r3d.stats }),
     };
     installCheats({
       player, world: () => world, entities: () => entities, inv: () => inv,
       getTime: () => dayTime, setTime: (t) => { dayTime = t; }, addDays: (n) => { dayCount += n; },
       setCreative: (on) => { creative = on; player.creative = on; if (!on) player.flying = false; }, isCreative: () => creative,
-      seed: () => seedText, say, lottie: l3d, addGems: (n) => { gems = Math.max(0, gems + n); }, weather,
+      seed: () => seedText, say, lottie: l3d, addGems: (n) => { gems = Math.max(0, gems + n); }, weather, music,
       gotoDim: (d) => {
         if (d === dim) return;
         if (d === 'void') { dim = 'overworld'; enterVoidPortal(); }

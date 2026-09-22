@@ -21,7 +21,7 @@ export interface HudInfo {
 type HeartAnim = keyof typeof HEART_SEG;
 interface HeartSlot { full: any; half: any; level: number; anim: HeartAnim; variant: number; t: number }
 
-export interface Settings { renderDist: number; fov: number; sens: number; vol: number; auto: boolean }
+export interface Settings { renderDist: number; fov: number; sens: number; vol: number; music: number; auto: boolean }
 export type WindowKind = 'inventory' | 'crafting' | 'furnace' | 'trade';
 
 const mapColorCache = new Map<number, readonly [number, number, number]>();
@@ -399,9 +399,10 @@ export class Hud {
     by += bh + gap;
     const fov = this.slider('fov', `FOV: ${st.fov}`, bx, by, bw, bh, st.fov, 50, 110);
     const sens = this.slider('sens', `Mouse sensitivity: ${st.sens}`, bx, by + bh + gap, bw, bh, st.sens, 2, 30);
-    const vol = this.slider('vol', `Volume: ${st.vol}`, bx, by + 2 * (bh + gap), bw, bh, st.vol, 0, 10);
-    if (fov !== st.fov || sens !== st.sens || vol !== st.vol) { st.fov = fov; st.sens = sens; st.vol = vol; action = 'settings'; }
-    by += 3 * (bh + gap);
+    const vol = this.slider('vol', `Sound: ${st.vol}`, bx, by + 2 * (bh + gap), bw, bh, st.vol, 0, 10);
+    const music = this.slider('music', `Music: ${st.music}`, bx, by + 3 * (bh + gap), bw, bh, st.music, 0, 10);
+    if (fov !== st.fov || sens !== st.sens || vol !== st.vol || music !== st.music) { st.fov = fov; st.sens = sens; st.vol = vol; st.music = music; action = 'settings'; }
+    by += 4 * (bh + gap);
     if (this.button(`Auto quality: ${st.auto ? 'On' : 'Off'}`, bx, by, bw, bh)) action = 'auto';
     by += bh + gap;
     if (this.button(`Game mode: ${creative ? 'Creative' : 'Survival'} (click to switch)`, bx, by, bw, bh)) action = 'mode';

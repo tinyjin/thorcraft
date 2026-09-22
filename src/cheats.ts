@@ -7,6 +7,7 @@ import { Inventory } from './inventory';
 import { Lottie3D } from './lottie3d';
 import { Player } from './player';
 import { villageRegion } from './structures';
+import { Music } from './music';
 import { Weather } from './weather';
 import { WH, World } from './world';
 
@@ -18,7 +19,7 @@ export interface CheatApi {
   seed(): string; say(msg: string): void;
   gotoDim(d: 'overworld' | 'ember' | 'void'): void; addGems(n: number): void;
   lottie: Lottie3D; setFlatMode(m: 'extrude' | 'card'): void;
-  weather: Weather;
+  weather: Weather; music: Music;
   /** Plays the end poem and credits from wherever the player stands. */
   playEnding(): void;
 }
@@ -35,6 +36,7 @@ itemKeys.set('water', B.WATER); itemKeys.set('lava', B.LAVA); itemKeys.set('air'
 const HELP = `Cheat commands (dev only) - run with cmd('/...'):
   /time set <day|noon|sunset|night|midnight|sunrise|0-24000>    /time add <ticks>    /time query
   /weather <clear|rain|thunder> [seconds]                        /toggledownfall      /weather query
+  /music <play|stop|list|dawn|stroke|fill|wireframe|ember|outline>   play the next fitting track now, or a named one
   /summon <${MOBS.join('|')}> [x y z] [count]                   (coordinates accept ~ and ~offset)
   /lottie3d <extrude|card>              extruded layered cutouts (default) or flat camera facing cards
   /dim <overworld|ember|void>           jump between dimensions             /ending  roll the credits
@@ -92,6 +94,15 @@ export function installCheats(api: CheatApi) {
         if (dur !== undefined && (Number.isNaN(dur) || dur <= 0)) return fail('Duration must be a positive number of seconds');
         w.set(k, dur);
         return out(k === 'clear' ? 'Set the weather to clear' : k === 'rain' ? 'Set the weather to rain' : 'Set the weather to rain & thunder');
+      }
+
+      case 'music': {
+        const m = api.music, k = (a[0] ?? 'play').toLowerCase();
+        if (k === 'stop') { m.skip(); return out('Music stopped'); }
+        if (k === 'list') return out(`Tracks: ${m.trackIds().join(', ')}${m.playing ? `  (playing: ${m.playing})` : ''}`);
+        if (k === 'play') { m.playNow(); return out('Playing the next track'); }
+        if (!m.playNow(k)) return fail(`Unknown track "${k}". Try /music list`);
+        return out(`Playing ${k}`);
       }
 
       case 'toggledownfall': api.weather.set(api.weather.raining ? 'clear' : 'rain'); return out(`Toggled downfall: now ${api.weather.kind}`);

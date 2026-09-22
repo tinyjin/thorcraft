@@ -18,6 +18,8 @@ export class Sfx {
 
   get volume() { return this.vol; }
   set volume(v: number) { this.vol = v; if (this.master) this.master.gain.value = v; }
+  /** The shared AudioContext, null until the first user gesture unlocked it. The music player builds its own bus on it. */
+  get context() { return this.ctx; }
 
   /** Must be called from a user gesture at least once. */
   unlock() {
