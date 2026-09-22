@@ -1017,21 +1017,45 @@ export class Renderer3D {
 
   // ------------------------------------------------------------------ overlays
 
-  /** Outlines the targeted block. */
-  drawSelection(bx: number, by: number, bz: number) {
+  /**
+   * Outlines the targeted block. There is no depth buffer, so the box's own hidden edges are culled by hand:
+   * only edges that belong to a face the camera can see are drawn, which is what a depth-tested wireframe
+   * would show for a solid cube. Plants and torches get a box that hugs their actual shape.
+   */
+  drawSelection(bx: number, by: number, bz: number, id: number) {
     this.outline.reset();
+    const def = BLOCKS[id];
+    let x0 = 0, x1 = 1, y0 = 0, y1 = 1, z0 = 0, z1 = 1, cull = true;
+    if (def.render === 'cross') { x0 = z0 = 0.15; x1 = z1 = 0.85; y1 = 0.9; cull = false; }
+    else if (def.render === 'torch') { x0 = z0 = 0.5 - 0.09; x1 = z1 = 0.5 + 0.09; y1 = 0.7; }
     const e = 0.004;
+    x0 -= e; y0 -= e; z0 -= e; x1 += e; y1 += e; z1 += e;
     const tx = this.tx, ty = this.ty, tz = this.tz;
     for (let i = 0; i < 8; i++) {
-      tx[i] = bx + (i & 1 ? 1 + e : -e); ty[i] = by + (i & 2 ? 1 + e : -e); tz[i] = bz + (i & 4 ? 1 + e : -e);
+      tx[i] = bx + (i & 1 ? x1 : x0); ty[i] = by + (i & 2 ? y1 : y0); tz[i] = bz + (i & 4 ? z1 : z0);
     }
     this.toCamera(8);
     for (let i = 0; i < 8; i++) if (this.czs[i] < NEAR) return;
     const c = this.cam;
     const sx: number[] = [], sy: number[] = [];
     for (let i = 0; i < 8; i++) { const inv = c.focal / this.czs[i]; sx[i] = c.cx + this.cxs[i] * inv; sy[i] = c.cy - this.cys[i] * inv; }
-    for (const [a, b] of BOX_EDGES) this.outline.moveTo(sx[a], sy[a]).lineTo(sx[b], sy[b]);
-    this.outline.stroke({ width: 2, color: [16, 16, 20, 220], cap: 'round', join: 'round' });
+    // Which side of each face pair the camera is on: bit set = the + face is visible, else the - face is.
+    const vis = [c.x > bx + x1 ? 1 : c.x < bx + x0 ? -1 : 0, c.y > by + y1 ? 1 : c.y < by + y0 ? -1 : 0, c.z > bz + z1 ? 1 : c.z < bz + z0 ? -1 : 0];
+    for (const [a, b] of BOX_EDGES) {
+      if (cull) {
+        // An edge is visible when either of the two faces it borders is; those faces lie on the axes the edge spans.
+        const axis = a ^ b; // 1, 2 or 4
+        let seen = false;
+        for (let k = 0; k < 3; k++) {
+          const bit = 1 << k;
+          if (bit === axis) continue;
+          if (vis[k] === (a & bit ? 1 : -1)) seen = true;
+        }
+        if (!seen) continue;
+      }
+      this.outline.moveTo(sx[a], sy[a]).lineTo(sx[b], sy[b]);
+    }
+    this.outline.stroke({ width: 2, color: [16, 16, 20, 200], cap: 'round', join: 'round' });
   }
 
   clearSelection() { this.outline.reset(); }

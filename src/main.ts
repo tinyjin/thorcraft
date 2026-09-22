@@ -791,7 +791,7 @@ async function boot() {
       }
       if (playing && mining.active && mining.progress > 0.02) r3d.drawCrack(mining.x, mining.y, mining.z, mining.progress);
       r3d.end(env);
-      if (playing && target) r3d.drawSelection(target.x, target.y, target.z);
+      if (playing && target) r3d.drawSelection(target.x, target.y, target.z, target.block);
       else r3d.clearSelection();
     }
     // Lottie billboards in the world: alerts over hunting mobs, creeper fuse rings, gem sparkles.
