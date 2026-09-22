@@ -4,6 +4,7 @@ import ThorVG from '@thorvg/webcanvas';
 import wasmUrl from '../node_modules/@thorvg/webcanvas/dist/thorvg.wasm?url';
 import { Sfx } from './audio';
 import { B, BLOCKS, CUBE, I, ITEMS, REPLACEABLE, SOLID, TOOL_SPEED, isBlockId } from './blocks';
+import { Ending, RunStats, newStats } from './ending';
 import { EntityManager, MODELS, Mob, MobKind } from './entities';
 import { Fx } from './fx';
 import { Hud, HudInfo, Settings, WindowKind } from './hud';
@@ -22,7 +23,7 @@ import { Camera, Environment, HeldView, Renderer3D } from './renderer';
 import { texture } from './textures';
 import { BIOME_NAMES, Biome, Dim, SEA, WH, World } from './world';
 
-type State = 'title' | 'loading' | 'playing' | 'paused' | 'window' | 'dead';
+type State = 'title' | 'loading' | 'playing' | 'paused' | 'window' | 'dead' | 'ending';
 type RendererName = 'gl' | 'wg' | 'sw';
 
 const SAVE_KEY = 'thorcraft.save.v2', SETTINGS_KEY = 'thorcraft.settings';
@@ -32,13 +33,19 @@ interface SaveData {
   seedText: string; edits: Record<string, number[]>; creative: boolean; time: number; gems: number; collected: string[];
   spawn: [number, number]; days?: number;
   // Dimensions (optional so older saves keep loading)
-  dim?: Dim; editsEmber?: Record<string, number[]>; editsVoid?: Record<string, number[]>; links?: PortalLink[]; boss?: boolean; adv?: string[]; lost?: string[];
+  dim?: Dim; editsEmber?: Record<string, number[]>; editsVoid?: Record<string, number[]>; links?: PortalLink[]; boss?: boolean; adv?: string[]; lost?: string[]; stats?: RunStats;
   player: { x: number; y: number; z: number; yaw: number; pitch: number; health: number };
   inv: (Stack | null)[]; selected: number; furnaces: Furnace[];
 }
 
 /** An Ember portal pair: `a` stands in the overworld, `b` in the Ember Depths. */
 interface PortalLink { a: [number, number, number]; b: [number, number, number] }
+
+/** Advancement titles by id; the credits count them. */
+const ADV: Record<string, string> = {
+  village: 'Craftstead', trade: 'What a Deal', raid: 'Hero of the Village', portal: 'We Need to Go Deeper', ember: 'Into the Ember Depths',
+  voidportal: 'The Vectors Align', void: 'The Vector Void', boss: 'Free the Outline (+25 gems)', home: 'Home Is Where the Chunks Load',
+};
 
 function hashString(s: string) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h | 0; }
 
@@ -90,7 +97,8 @@ async function boot() {
   l3d.load('cinder', cinderLottie()); l3d.load('glitch', glitchLottie()); l3d.load('outline', outlineBossLottie());
   setFlatArtProvider((name) => { const a = l3d.assets.get(name), f = a?.frames[0]; return a && f ? { shapes: f.shapes, w: a.w, h: a.h } : null; });
   canvas.add(l3d.stage);
-  canvas.add(worldScene).add(fx.billboardScene).add(fx.scene).add(hud.scene);
+  const ending = new Ending(TVG, 'ui', sfx);
+  canvas.add(worldScene).add(fx.billboardScene).add(fx.scene).add(hud.scene).add(ending.scene);
 
   const cam = new Camera();
   const player = new Player();
@@ -105,6 +113,7 @@ async function boot() {
   let pendingEdits: Partial<Record<Dim, Record<string, number[]>>> = {};
   let links: PortalLink[] = [];
   let bossDefeated = false;
+  let stats = newStats();
   const advancements = new Set<string>(), collectedGems = new Set<string>(), lostVillagers = new Set<string>();
   let portalTime = 0, portalCooldown = 0;
   let arrive: (() => void) | null = null;
@@ -140,7 +149,7 @@ async function boot() {
 
   const say = (msg: string) => { toast = msg; toastTimer = 3; };
   const fkey = (x: number, y: number, z: number) => `${dim}:${x},${y},${z}`;
-  const advance = (id: string, text: string) => { if (advancements.has(id)) return; advancements.add(id); say(`Advancement: ${text}`); sfx.gem(); };
+  const advance = (id: string) => { if (advancements.has(id)) return; advancements.add(id); say(`Advancement: ${ADV[id]}`); sfx.gem(); };
 
   const hooks = {
     pickup: (id: number, count: number, dur?: number) => inv.add(id, count, dur),
@@ -165,7 +174,7 @@ async function boot() {
     if (!entities || state === 'title' || state === 'loading') return;
     const data: SaveData = {
       seedText, edits: (worlds.overworld ?? world).serializeEdits(), creative, time: dayTime, days: dayCount, gems, collected: [...collectedGems], spawn,
-      dim, editsEmber: worlds.ember?.serializeEdits() ?? pendingEdits.ember, editsVoid: worlds.void?.serializeEdits() ?? pendingEdits.void, links, boss: bossDefeated, adv: [...advancements], lost: [...lostVillagers],
+      dim, editsEmber: worlds.ember?.serializeEdits() ?? pendingEdits.ember, editsVoid: worlds.void?.serializeEdits() ?? pendingEdits.void, links, boss: bossDefeated, adv: [...advancements], lost: [...lostVillagers], stats,
       player: { x: player.x, y: player.y, z: player.z, yaw: player.yaw, pitch: player.pitch, health: player.dead ? 20 : player.health },
       inv: inv.slots, selected: inv.selected, furnaces: [...furnaces.values()],
     };
@@ -213,6 +222,7 @@ async function boot() {
     worlds = {};
     pendingEdits = save ? { overworld: save.edits, ember: save.editsEmber, void: save.editsVoid } : {};
     links = save?.links ?? []; bossDefeated = !!save?.boss;
+    stats = { ...newStats(), ...(save?.stats ?? {}) };
     advancements.clear(); collectedGems.clear(); lostVillagers.clear();
     for (const a of save?.adv ?? []) advancements.add(a);
     for (const a of save?.collected ?? []) collectedGems.add(a);
@@ -322,6 +332,7 @@ async function boot() {
     if (!id) return;
     if (id === B.FURNACE || id === B.FURNACE_LIT) spillFurnace(x, y, z);
     world.setBlock(x, y, z, B.AIR);
+    stats.mined++;
     sfx.breakBlock(id);
     entities.blockBurst(x, y, z, id, 16);
     if (drop) spawnDrops(id, x, y, z);
@@ -364,7 +375,7 @@ async function boot() {
       if (ok && cells.length >= 6) {
         for (const [x, y, z] of cells) world.setBlock(x, y, z, B.EMBER_PORTAL);
         sfx.explode(); fx.burst(0.5);
-        advance('portal', 'We Need to Go Deeper');
+        advance('portal');
         return true;
       }
     }
@@ -382,7 +393,7 @@ async function boot() {
       if (s.frames.every(([x, y, z]) => world.getBlock(x, y, z) === B.PORTAL_FRAME_EYE)) {
         for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) world.setBlock(s.portal[0] + dx, s.portal[1], s.portal[2] + dz, B.VOID_PORTAL);
         sfx.explode(); fx.burst(0.8);
-        advance('voidportal', 'The Vectors Align');
+        advance('voidportal');
       }
       return;
     }
@@ -398,6 +409,7 @@ async function boot() {
   const travel = (to: Dim, x: number, y: number, z: number, place: () => void) => {
     writeSave();
     dim = to;
+    if (!stats.dims.includes(to)) stats.dims.push(to);
     world = getWorld(to);
     newEntities();
     target = null; mining.active = false; portalTime = 0; portalCooldown = 4;
@@ -441,7 +453,7 @@ async function boot() {
       const end = link[there];
       player.x = end[0] + 0.5; player.y = end[1] + 0.01; player.z = end[2] + 1.5;
       player.yaw = Math.PI; player.pitch = 0; // step out facing away from the film
-      if (to === 'ember') advance('ember', 'Into the Ember Depths'); 
+      if (to === 'ember') advance('ember');
     });
   };
 
@@ -450,7 +462,7 @@ async function boot() {
       travel('void', VOID_ARRIVAL[0] + 0.5, 60, VOID_ARRIVAL[2] + 0.5, () => {
         player.y = world.surfaceY(VOID_ARRIVAL[0], VOID_ARRIVAL[2]) + 0.01;
         player.yaw = Math.PI / 2;
-        advance('void', 'The Vector Void');
+        advance('void');
       });
     } else {
       travel('overworld', spawn[0] + 0.5, 60, spawn[1] + 0.5, () => player.spawnAt(world, spawn[0], spawn[1]));
@@ -466,12 +478,26 @@ async function boot() {
     const top = world.surfaceY(1, 1) - 1;
     for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) world.setBlock(dx, top + 1, dz, B.VOID_PORTAL);
     entities.drop(B.TROPHY, 1, 4.5, top + 3, 0.5); entities.drop(I.DIAMOND, 6, 4.5, top + 3, 1.5); entities.drop(I.EMBER_INGOT, 4, 4.5, top + 3, -0.5); entities.drop(I.LOTTIE_STAR, 5, 5.5, top + 3, 0.5);
-    advance('boss', 'Free the Outline (+25 gems)');
+    advance('boss');
   }
+
+  /** The way home out of the Void: the world melts, the poem and credits play, then the overworld. */
+  const startEnding = () => {
+    state = 'ending'; input.unlock(); cameraMode = 0;
+    target = null; mining.active = false; portalTime = 0; portalCooldown = 4;
+    writeSave();
+    ending.start({ seed: seedText, creative, renderer: rendererName, days: dayCount, gems, stats, advancements: [...advancements].map((a) => ADV[a]).filter(Boolean), advTotal: Object.keys(ADV).length });
+  };
+
+  const goHome = () => {
+    ending.stop();
+    const hp = player.health; // spawnAt heals; the trip home is not a respawn
+    travel('overworld', spawn[0] + 0.5, 60, spawn[1] + 0.5, () => { player.spawnAt(world, spawn[0], spawn[1]); player.health = hp; player.pitch = -0.1; advance('home'); });
+  };
 
   // ------------------------------------------------------------------ villagers
 
-  const openTrade = (m: Mob) => { tradeMob = m; winKind = 'trade'; state = 'window'; input.unlock(); sfx.click(); advance('trade', 'What a Deal'); };
+  const openTrade = (m: Mob) => { tradeMob = m; winKind = 'trade'; state = 'window'; input.unlock(); sfx.click(); advance('trade'); };
 
   const doTrade = (t: Trade) => {
     if (t.gems > 0) {
@@ -490,7 +516,7 @@ async function boot() {
     if (raid) {
       const left = entities.mobs.filter((m) => m.tag === 'raid').length;
       if (left === 0 || env.night < 0.3) {
-        if (left === 0) { gems += 6; say('Raid repelled! The village rewards you with 6 gems'); sfx.gem(); advance('raid', 'Hero of the Village'); }
+        if (left === 0) { gems += 6; say('Raid repelled! The village rewards you with 6 gems'); sfx.gem(); advance('raid'); }
         raid = null;
       }
       return;
@@ -567,6 +593,7 @@ async function boot() {
     }
     if (SOLID[id] && (player.intersectsCell(x, y, z) || entities.blockOccupied(x, y, z))) return;
     world.setBlock(x, y, z, id);
+    stats.placed++;
     sfx.place(id); player.swing = 1;
     if (!creative) inv.consumeHeld();
   };
@@ -588,6 +615,7 @@ async function boot() {
       attackCd = 0.3; player.swing = 1;
       const hl = Math.hypot(d[0], d[2]) || 1;
       mobHit.mob.damage(creative ? 30 : tool ? tool.damage : 1, d[0] / hl, d[2] / hl, entities);
+      if (mobHit.mob.dead) stats.slain++;
       sfx.hit();
       if (tool && !creative && inv.damageHeld()) sfx.toolBreak();
     } else if (input.buttons[0] && target && breakCd <= 0) {
@@ -743,6 +771,7 @@ async function boot() {
       if (playing && input.locked) player.look(input, settings.sens * 0.00024);
       player.update(world, input, dt, clock, playing);
       if (playing) interact(dt); else { mining.active = false; target = null; }
+      if (playing) { stats.played += dt; stats.walked += Math.hypot(player.vx, player.vz) * dt; }
       entities.update(dt, player, env.night);
       world.tick(dt);
       tickFurnaces(dt);
@@ -752,11 +781,11 @@ async function boot() {
       const pb = world.getBlock(Math.floor(player.x), Math.floor(player.y + 0.4), Math.floor(player.z));
       const inPortal = (pb === B.EMBER_PORTAL || pb === B.VOID_PORTAL) && portalCooldown <= 0 && !player.dead;
       portalTime = inPortal ? portalTime + dt : Math.max(0, portalTime - dt * 2);
-      if (inPortal && portalTime > (creative ? 0.5 : 2.2)) { if (pb === B.EMBER_PORTAL) enterEmberPortal(); else enterVoidPortal(); }
-      if (dim === 'overworld' && !advancements.has('village') && world.villagesNear(player.x, player.z, 36).length) advance('village', 'Craftstead');
+      if (inPortal && portalTime > (creative ? 0.5 : 2.2)) { if (pb === B.EMBER_PORTAL) enterEmberPortal(); else if (dim === 'void') startEnding(); else enterVoidPortal(); }
+      if (dim === 'overworld' && !advancements.has('village') && world.villagesNear(player.x, player.z, 36).length) advance('village');
       if (player.dead && state !== 'dead') {
         if (state === 'window') win.close(inv, dropStack);
-        state = 'dead'; input.unlock(); cameraMode = 1;
+        state = 'dead'; input.unlock(); cameraMode = 1; stats.deaths++;
       }
       saveTimer += dt;
       if (saveTimer > 15) { saveTimer = 0; writeSave(); }
@@ -773,12 +802,18 @@ async function boot() {
       cam.y += (wantY - cam.y) * Math.min(1, dt * 1.5);
       cam.yaw = Math.atan2(cam.x - cx, cam.z - cz); cam.pitch = -0.38; cam.fov = 75;
       dayTime = (dayTime + dt / 120) % 1;
-    } else placeCamera(dt);
+    } else {
+      if (state === 'ending') { player.pitch += (0.5 - player.pitch) * Math.min(1, dt * 0.6); player.yaw += dt * 0.04; }
+      placeCamera(dt);
+      if (state === 'ending') cam.y += ending.lift;
+    }
     cam.setup(W, H);
     updateEnv();
 
-    // --- 3D scene
-    if (state !== 'loading') {
+    // --- 3D scene (the credits cover it completely, so it rests while they roll)
+    const covered = state === 'ending' && ending.opaque;
+    worldScene.visible(!covered);
+    if (state !== 'loading' && !covered) {
       r3d.begin(cam, clock);
       r3d.drawSky(env);
       r3d.drawWorld(world);
@@ -796,7 +831,7 @@ async function boot() {
     }
     // Lottie billboards in the world: alerts over hunting mobs, creeper fuse rings, gem sparkles.
     fx.beginBillboards();
-    if (state !== 'loading' && fx.enabled) {
+    if (state !== 'loading' && !covered && fx.enabled) {
       for (const m of entities.mobs) {
         if (m.fuse > 0) fx.billboard('fuse', world, cam, m.x, m.y + m.h * 0.55, m.z, clock, 1.9);
         else if (m.alert >= 0 && m.alert < 1.2) fx.billboard('alert', world, cam, m.x, m.y + m.h + 0.45, m.z, m.alert, 0.7);
@@ -804,8 +839,8 @@ async function boot() {
       for (const g of entities.gems.values()) fx.billboard('sparkle', world, cam, g.x, g.y + 0.3 + Math.sin(clock * 2 + g.x) * 0.15, g.z, clock + g.x * 0.37, 1.3);
     }
     fx.endBillboards();
-    fx.lights(world, cam, env, dt, state !== 'loading');
-    fx.post({ menuOpen: state === 'paused' || state === 'window' || state === 'dead', underwater: env.underwater, inLava: player.inLava && state !== 'title', hurt: state === 'title' ? 0 : player.hurtTimer, night: env.night, dim: state === 'title' ? 'overworld' : dim, portal: Math.min(1, portalTime / 2.2) }, dt);
+    fx.lights(world, cam, env, dt, state !== 'loading' && !covered);
+    fx.post({ menuOpen: state === 'paused' || state === 'window' || state === 'dead', underwater: env.underwater, inLava: player.inLava && state !== 'title', hurt: state === 'title' ? 0 : player.hurtTimer, night: env.night, dim: state === 'title' ? 'overworld' : dim, portal: state === 'ending' ? 1 : Math.min(1, portalTime / 2.2) }, dt);
 
     // --- HUD and menus
     toastTimer = Math.max(0, toastTimer - dt);
@@ -867,6 +902,8 @@ async function boot() {
         if (picked >= 0) doTrade(TRADES[job][picked]);
         if (!tradeMob || tradeMob.dead || Math.hypot(tradeMob.x - player.x, tradeMob.z - player.z) > 6) closeWindow();
       } else if (hud.drawWindow(winKind, inv, win, creative, openFurnace)) sfx.click();
+    } else if (state === 'ending') {
+      if (ending.draw(input, W, H, dt, clock)) goHome();
     } else if (state === 'dead') {
       if (hud.drawDead(gems) === 'respawn') {
         if (!creative) for (const s of inv.slots) if (s) entities.drop(s.id, s.count, player.x, player.y + 1, player.z, s.dur);
@@ -911,7 +948,7 @@ async function boot() {
       setTime: (t: number) => { dayTime = t; }, setDay: (d: number) => { dayCount = d; }, setState: (s: State) => { state = s; }, open: (k: WindowKind) => openWindow(k),
       give: (id: number, n = 1) => inv.add(id, n), win, furnaces: () => furnaces,
       spawn: (kind: MobKind, dx: number, dz: number) => { const x = Math.floor(player.x + dx), z = Math.floor(player.z + dz); entities.mobs.push(new Mob(kind, x + 0.5, world.surfaceY(x, z), z + 0.5)); },
-      setCamera: (m: number) => { cameraMode = m; }, fx, l3d, worldScene, TVG, canvas, stats: () => ({ fps, frameAvg, ...r3d.stats }),
+      setCamera: (m: number) => { cameraMode = m; }, fx, l3d, worldScene, TVG, canvas, ending, stats: () => ({ fps, frameAvg, ...r3d.stats }),
     };
     installCheats({
       player, world: () => world, entities: () => entities, inv: () => inv,
@@ -924,6 +961,7 @@ async function boot() {
         else if (d === 'overworld') travel('overworld', spawn[0] + 0.5, 60, spawn[1] + 0.5, () => player.spawnAt(world, spawn[0], spawn[1]));
         else { const x = Math.floor(player.x), z = Math.floor(player.z); travel('ember', x + 0.5, 44, z + 0.5, () => { for (let r = 0; r < 24; r++) { const y = world.floorAt(x + r, 44, z, 30); if (y > 24) { player.x = x + r + 0.5; player.y = y + 0.01; return; } } }); }
       }, setFlatMode: (m) => { r3d.flatMode = m; },
+      playEnding: () => { if (state === 'playing') startEnding(); },
     });
   }
   requestAnimationFrame(frame);

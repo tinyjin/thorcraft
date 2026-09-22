@@ -76,4 +76,8 @@ export class Sfx {
   eat() { for (let i = 0; i < 3; i++) setTimeout(() => this.burst(0.08, 900, 2, 0.4), i * 110); }
   toolBreak() { this.tone(900, 200, 0.2, 0.2); }
   mob() { this.tone(180 + Math.random() * 80, 120, 0.25, 0.1, 'sawtooth'); }
+  /** A soft held note for the ending credits (frequency in Hz). */
+  note(freq: number, dur = 1.2, gain = 0.05, type: OscillatorType = 'sine') { this.tone(freq, freq * 0.995, dur, gain, type); }
+  /** Deep hum of the portal taking hold. */
+  drone() { this.tone(55, 38, 3.5, 0.25, 'sine'); this.tone(110, 82, 2.5, 0.08, 'triangle'); }
 }

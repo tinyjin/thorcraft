@@ -11,6 +11,36 @@ type FlatArt = { shapes: { r: number; g: number; b: number; a: number; polys: Fl
 let flatArt: (asset: string) => FlatArt = () => null;
 export const setFlatArtProvider = (fn: (asset: string) => FlatArt) => { flatArt = fn; };
 
+const widthCache = new Map<string, number>();
+let measureCtx: CanvasRenderingContext2D | null = null;
+/** Text width in canvas pixels, measured with the same font file through a 2D context. ThorVG sizes are points (4/3 px). */
+export function textWidth(str: string, size: number): number {
+  const key = size + '|' + str;
+  let w = widthCache.get(key);
+  if (w === undefined) {
+    measureCtx ??= document.createElement('canvas').getContext('2d');
+    if (!measureCtx || !document.fonts.check(`${size}px thorcraft-ui`)) return str.length * size * 0.62;
+    measureCtx.font = `${(size * 4) / 3}px thorcraft-ui`;
+    if (widthCache.size > 4000) widthCache.clear();
+    widthCache.set(key, (w = measureCtx.measureText(str).width));
+  }
+  return w;
+}
+
+/** Greedy word wrap against a pixel width. */
+export function wrapText(str: string, size: number, maxWidth: number): string[] {
+  const out: string[] = [];
+  for (const para of str.split('\n')) {
+    let line = '';
+    for (const word of para.split(' ')) {
+      const next = line ? line + ' ' + word : word;
+      if (line && textWidth(next, size) > maxWidth) { out.push(line); line = word; } else line = next;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
 interface PooledText { paint: any; str: string; size: number; color: string }
 
 export class UILayer {

@@ -60,5 +60,10 @@ URL parameters: `renderer=gl|wg|sw`, `seed=abc`, `dist=64` (fixed view distance)
   tunnel surfaces at a lantern ruin; twelve eyes open the portal. Islands of outlined void stone under an SVG planet
   and aurora, Glitches that turn hostile when stared at, and The Outline, a boss shielded by anchor crystals on
   obsidian pillars. Defeating it opens the way home and drops a trophy
-- Advancement toasts; dev cheats: `/dim`, `/locate village|stronghold`, `/gems`, `/summon cinder|ashling|glitch|outline`
+- The ending (`src/ending.ts`): stepping into the way home melts the Void away (scene blur and tint) and plays the
+  end poem, a conversation between the Stroke and the Fill about the player, typed out over polygons that draw
+  themselves with trim paths. Then the credits roll: the gradient logo, the cast as live Lottie animations, every
+  engine feature that drew the world, and the stats of your run (days, blocks mined and placed, mobs slain, deaths,
+  distance, dimensions, advancements). Hold Space to hurry, Esc to skip; the credits end with the way back to spawn
+- Advancement toasts; dev cheats: `/dim`, `/locate village|stronghold`, `/gems`, `/summon cinder|ashling|glitch|outline`, `/ending`
 - World edits, inventory, furnaces and player state persist in `localStorage`

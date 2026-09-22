@@ -6,7 +6,7 @@ import { COOK_TIME, CREATIVE_ITEMS, Furnace, HOTBAR, Inventory, SlotKind, SlotRe
 import { ARROW_FRAMES, FLAME_FRAMES, HEART_SEG, arrowLottie, flameLottie, heartLottie } from './lottie';
 import { Player } from './player';
 import { texture } from './textures';
-import { UILayer } from './ui';
+import { UILayer, textWidth } from './ui';
 import { SEA, World } from './world';
 
 const HEART = ['0110110', '1111111', '1111111', '0111110', '0011100', '0001000'];
@@ -59,21 +59,6 @@ export class Hud {
   private titleText: any = null;
   private mapClip: any;
   private lastTime = 0;
-  private tipWidths = new Map<string, number>();
-  private measureCtx: CanvasRenderingContext2D | null = null;
-
-  /** Text width in canvas pixels, measured with the same font file through a 2D context. ThorVG sizes are points (4/3 px). */
-  private textWidth(str: string, size: number): number {
-    const key = size + '|' + str;
-    let w = this.tipWidths.get(key);
-    if (w === undefined) {
-      this.measureCtx ??= document.createElement('canvas').getContext('2d');
-      if (!this.measureCtx || !document.fonts.check(`${size}px thorcraft-ui`)) return str.length * size * 0.62;
-      this.measureCtx.font = `${(size * 4) / 3}px thorcraft-ui`;
-      this.tipWidths.set(key, (w = this.measureCtx.measureText(str).width));
-    }
-    return w;
-  }
 
   constructor(private TVG: any, private input: Input, font: string) {
     this.scene = new TVG.Scene();
@@ -513,7 +498,7 @@ export class Hud {
       // Size the box from real font metrics. (ThorVG's bounds() lags a frame behind on pooled text paints, which
       // made the box keep the previous item's width.)
       t.text(tip, inp.mouseX + 22, inp.mouseY - 19, 13, WHITE, 0, 0.5);
-      const tw = this.textWidth(tip, 13);
+      const tw = textWidth(tip, 13);
       t.rect(inp.mouseX + 12, inp.mouseY - 32, tw + 20, 26, [42, 10, 90, 255]);
       t.rect(inp.mouseX + 14, inp.mouseY - 30, tw + 16, 22, [16, 0, 32, 245]);
     }

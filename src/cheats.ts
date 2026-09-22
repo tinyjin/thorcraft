@@ -17,6 +17,8 @@ export interface CheatApi {
   seed(): string; say(msg: string): void;
   gotoDim(d: 'overworld' | 'ember' | 'void'): void; addGems(n: number): void;
   lottie: Lottie3D; setFlatMode(m: 'extrude' | 'card'): void;
+  /** Plays the end poem and credits from wherever the player stands. */
+  playEnding(): void;
 }
 
 const MOBS: MobKind[] = ['pig', 'cow', 'sheep', 'zombie', 'creeper', 'slime', 'ghost', 'cinder', 'ashling', 'glitch', 'outline'];
@@ -32,7 +34,7 @@ const HELP = `Cheat commands (dev only) - run with cmd('/...'):
   /time set <day|noon|sunset|night|midnight|sunrise|0-24000>    /time add <ticks>    /time query
   /summon <${MOBS.join('|')}> [x y z] [count]                   (coordinates accept ~ and ~offset)
   /lottie3d <extrude|card>              extruded layered cutouts (default) or flat camera facing cards
-  /dim <overworld|ember|void>           jump between dimensions
+  /dim <overworld|ember|void>           jump between dimensions             /ending  roll the credits
   /locate <village|stronghold>          nearest structure (then /tp to it)      /gems <n>
   /give <item> [count]        /clear                            /items [filter]  lists item names
   /gamemode <survival|creative>                                 /fly
@@ -123,6 +125,8 @@ export function installCheats(api: CheatApi) {
         api.gotoDim(d);
         return out(`Travelling to ${d}`);
       }
+
+      case 'ending': case 'credits': api.playEnding(); return out('Rolling the credits');
 
       case 'locate': {
         const what = (a[0] ?? '').toLowerCase();
